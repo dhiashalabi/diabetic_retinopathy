@@ -292,7 +292,9 @@ def visualize_gradcam_grid(
                     input_t = img_tensor.unsqueeze(0).to(device)
                 else:
                     img_np = img_tensor
-                    input_t = torch.from_numpy(img_np).permute(2, 0, 1).unsqueeze(0).float().to(device)
+                    img_arr = img_np.astype(np.float32) / 255.0
+                    img_arr = (img_arr - np.array(config.IMG_MEAN)) / np.array(config.IMG_STD)
+                    input_t = torch.from_numpy(img_arr).permute(2, 0, 1).unsqueeze(0).float().to(device)
 
                 heatmap = cam.generate_heatmap(input_t, target_class=label)
                 overlay = cam.overlay_heatmap(img_np, heatmap)
