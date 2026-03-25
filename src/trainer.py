@@ -222,6 +222,9 @@ class Trainer:
                 acc=f"{100 * correct / total:.1f}%",
             )
 
+        if total == 0:
+            return {"loss": 0.0, "acc": 0.0, "kappa": 0.0}
+
         epoch_loss = running_loss / total
         epoch_acc = correct / total
         epoch_kappa = cohen_kappa_score(
@@ -256,6 +259,9 @@ class Trainer:
             total += batch_size
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
+
+        if total == 0:
+            return {"loss": 0.0, "acc": 0.0, "kappa": 0.0}
 
         epoch_loss = running_loss / total
         epoch_acc = correct / total
@@ -591,10 +597,14 @@ class Trainer:
 
         # All done — save final history and clean up resume file
         history_path = os.path.join(config.LOGS_DIR, "training_history.json")
+        def _sanitize(v):
+            f = float(v)
+            return 0.0 if (f != f) else f
+
         os.makedirs(os.path.dirname(history_path), exist_ok=True)
         with open(history_path, "w") as f:
             json.dump(
-                {k: [float(v) for v in vs] for k, vs in self.history.items()},
+                {k: [_sanitize(v) for v in vs] for k, vs in self.history.items()},
                 f, indent=2,
             )
         logger.info(f"Training history saved to {history_path}")

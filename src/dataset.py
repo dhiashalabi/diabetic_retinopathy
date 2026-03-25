@@ -22,6 +22,9 @@ from sklearn.utils.class_weight import compute_class_weight
 
 from . import config
 from .preprocessing import preprocess_image
+from .utils import get_logger
+
+_logger = get_logger(__name__)
 
 
 # -----------------------------------------------------------------------
@@ -56,7 +59,12 @@ def load_and_split_dataframe(
     elif "id_code" in df.columns and "diagnosis" in df.columns:
         df = df.rename(columns={"id_code": "image", "diagnosis": "level"})
 
-    df["patient_id"] = df["image"].str.extract(r"(\d+)_")[0].astype(int)
+    df["patient_id"] = df["image"].str.extract(r"(\d+)_")[0]
+    bad_rows = df["patient_id"].isna()
+    if bad_rows.any():
+        _logger.warning(f"Dropped {bad_rows.sum()} rows with unparseable image names")
+        df = df[~bad_rows].reset_index(drop=True)
+    df["patient_id"] = df["patient_id"].astype(int)
 
     # Worst diagnosis per patient for stratification
     patient_worst = (
@@ -189,6 +197,7 @@ class DRDataset(Dataset):
             img = None
 
         if img is None:
+            _logger.warning(f"Missing/unreadable image: '{img_id}' — using black placeholder")
             img = np.zeros((self.img_size, self.img_size, 3), dtype=np.uint8)
         else:
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)

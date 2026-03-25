@@ -109,7 +109,9 @@ NUM_WORKERS = 2 if IS_COLAB else 0
 PIN_MEMORY = True
 
 # ---------------------------------------------------------------------------
-# Ensure output directories exist
+# Directory creation (call explicitly at runtime, not on import)
 # ---------------------------------------------------------------------------
-for _dir in [DATA_DIR, OUTPUTS_DIR, CHECKPOINTS_DIR, FIGURES_DIR, LOGS_DIR]:
-    os.makedirs(_dir, exist_ok=True)
+def ensure_dirs():
+    """Create all required output directories. Call once at the start of each notebook."""
+    for d in [DATA_DIR, OUTPUTS_DIR, CHECKPOINTS_DIR, FIGURES_DIR, LOGS_DIR]:
+        os.makedirs(d, exist_ok=True)

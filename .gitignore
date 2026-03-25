@@ -29,6 +29,11 @@ dataset/resized_train_cropped/
 dataset/resized_train/
 *.zip
 
+# Virtual environments
+venv/
+.venv/
+env/
+
 # Secrets
 .env
 kaggle.json
