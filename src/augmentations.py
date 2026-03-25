@@ -28,9 +28,12 @@ def get_train_transforms(img_size: int = config.IMG_SIZE) -> A.Compose:
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.5),
         A.RandomRotate90(p=0.5),
-        A.ShiftScaleRotate(
-            shift_limit=0.1, scale_limit=0.15,
-            rotate_limit=30, border_mode=0, p=0.5,
+        A.Affine(
+            translate_percent={"x": (-0.1, 0.1), "y": (-0.1, 0.1)},
+            scale=(0.85, 1.15),
+            rotate=(-30, 30),
+            border_mode=0, fill=0,
+            keep_ratio=True, p=0.5,
         ),
         A.OneOf([
             A.GaussianBlur(blur_limit=(3, 5)),
