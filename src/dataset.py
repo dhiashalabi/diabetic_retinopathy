@@ -25,6 +25,7 @@ from .preprocessing import preprocess_image
 from .utils import get_logger
 
 _logger = get_logger(__name__)
+_EXTENSIONS = (".jpeg", ".jpg", ".png", ".JPEG", ".JPG")
 
 
 # -----------------------------------------------------------------------
@@ -171,13 +172,26 @@ class DRDataset(Dataset):
 
         self.image_ids = self.df["image"].values
         self.labels = self.df["level"].values.astype(np.int64)
+        self._path_cache = self._build_image_path_cache()
+
+    def _build_image_path_cache(self) -> dict[str, str]:
+        """Resolve and cache image paths once to avoid per-item filesystem probing."""
+        cache: dict[str, str] = {}
+        for img_id in self.image_ids:
+            if img_id in cache:
+                continue
+            for ext in _EXTENSIONS:
+                p = os.path.join(self.images_dir, img_id + ext)
+                if os.path.isfile(p):
+                    cache[img_id] = p
+                    break
+        return cache
 
     def _find_image_path(self, img_id: str) -> str:
         """Try common extensions and return the first path that exists."""
-        for ext in (".jpeg", ".jpg", ".png", ".JPEG", ".JPG"):
-            p = os.path.join(self.images_dir, img_id + ext)
-            if os.path.isfile(p):
-                return p
+        p = self._path_cache.get(img_id)
+        if p is not None:
+            return p
         raise FileNotFoundError(
             f"Image not found for '{img_id}' in {self.images_dir} "
             f"(tried .jpeg/.jpg/.png)"
@@ -270,22 +284,28 @@ def create_dataloaders(
         )
         shuffle_train = False  # mutually exclusive with sampler
 
+    common_loader_kwargs = {
+        "num_workers": num_workers,
+        "pin_memory": config.PIN_MEMORY,
+    }
+    if num_workers > 0:
+        common_loader_kwargs["persistent_workers"] = True
+        common_loader_kwargs["prefetch_factor"] = config.PREFETCH_FACTOR
+
     loaders = {
         "train": DataLoader(
             train_ds,
             batch_size=batch_size,
             shuffle=shuffle_train,
             sampler=sampler,
-            num_workers=num_workers,
-            pin_memory=config.PIN_MEMORY,
             drop_last=True,
+            **common_loader_kwargs,
         ),
         "valid": DataLoader(
             valid_ds,
             batch_size=batch_size,
             shuffle=False,
-            num_workers=num_workers,
-            pin_memory=config.PIN_MEMORY,
+            **common_loader_kwargs,
         ),
     }
 
@@ -298,8 +318,58 @@ def create_dataloaders(
             test_ds,
             batch_size=batch_size,
             shuffle=False,
-            num_workers=num_workers,
-            pin_memory=config.PIN_MEMORY,
+            **common_loader_kwargs,
         )
 
     return loaders
+
+
+def preprocess_images_to_cache(
+    df: pd.DataFrame,
+    source_images_dir: str = config.IMAGES_DIR,
+    cache_dir: Optional[str] = None,
+    img_size: int = config.IMG_SIZE,
+    overwrite: bool = False,
+) -> str:
+    """
+    Preprocess images once and store as JPEG cache for fast training reads.
+    """
+    cache_dir = cache_dir or os.path.join(config.DATA_DIR, f"preprocessed_{img_size}")
+    os.makedirs(cache_dir, exist_ok=True)
+
+    unique_ids = pd.unique(df["image"])
+    written = 0
+    skipped = 0
+    missing = 0
+
+    for img_id in unique_ids:
+        out_path = os.path.join(cache_dir, f"{img_id}.jpg")
+        if os.path.isfile(out_path) and not overwrite:
+            skipped += 1
+            continue
+
+        src_path = None
+        for ext in _EXTENSIONS:
+            candidate = os.path.join(source_images_dir, img_id + ext)
+            if os.path.isfile(candidate):
+                src_path = candidate
+                break
+        if src_path is None:
+            missing += 1
+            continue
+
+        img = cv2.imread(src_path)
+        if img is None:
+            missing += 1
+            continue
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        img = preprocess_image(img, img_size=img_size)
+        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(out_path, img, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+        written += 1
+
+    _logger.info(
+        "Preprocessing cache ready at %s | written=%d skipped=%d missing=%d",
+        cache_dir, written, skipped, missing
+    )
+    return cache_dir
