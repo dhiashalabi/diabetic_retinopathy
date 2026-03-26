@@ -11,14 +11,14 @@ Works on Colab (share=True) and locally.
 
 import os
 
+import gradio as gr
 import numpy as np
 import torch
-import gradio as gr
 
 from . import config
-from .preprocessing import preprocess_image
 from .augmentations import get_valid_transforms
 from .model import build_model
+from .preprocessing import preprocess_image
 
 
 def load_model(checkpoint_path: str | None = None, device: str = "auto"):
@@ -32,7 +32,8 @@ def load_model(checkpoint_path: str | None = None, device: str = "auto"):
 
     if checkpoint_path is None:
         checkpoint_path = os.path.join(
-            config.CHECKPOINTS_DIR, "best_model_phase2.pth",
+            config.CHECKPOINTS_DIR,
+            "best_model_phase2.pth",
         )
 
     if os.path.exists(checkpoint_path):
@@ -61,10 +62,7 @@ def predict_image(image: np.ndarray, model, device) -> tuple[np.ndarray, dict]:
         logits = model(tensor)
         probs = torch.softmax(logits, dim=1).cpu().numpy()[0]
 
-    confidences = {
-        config.CLASS_NAMES[i]: float(probs[i])
-        for i in range(config.NUM_CLASSES)
-    }
+    confidences = {config.CLASS_NAMES[i]: float(probs[i]) for i in range(config.NUM_CLASSES)}
 
     return preprocessed, confidences
 

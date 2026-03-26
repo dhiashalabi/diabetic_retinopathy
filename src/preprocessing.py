@@ -39,8 +39,9 @@ def crop_fundus(img: np.ndarray, tolerance: int = 15) -> np.ndarray:
     return img[y : y + h, x : x + w]
 
 
-def apply_clahe(img: np.ndarray, clip_limit: float = 2.0,
-                tile_grid_size: tuple = (8, 8)) -> np.ndarray:
+def apply_clahe(
+    img: np.ndarray, clip_limit: float = 2.0, tile_grid_size: tuple = (8, 8)
+) -> np.ndarray:
     """
     Enhance contrast via CLAHE on the L channel of LAB colour space.
 
@@ -57,8 +58,7 @@ def apply_clahe(img: np.ndarray, clip_limit: float = 2.0,
     return cv2.cvtColor(lab_enhanced, cv2.COLOR_LAB2RGB)
 
 
-def ben_graham_preprocessing(img: np.ndarray,
-                             sigma_ratio: float = 0.1) -> np.ndarray:
+def ben_graham_preprocessing(img: np.ndarray, sigma_ratio: float = 0.1) -> np.ndarray:
     """
     Ben Graham's colour-normalisation trick (1st place, Kaggle DR 2015).
 
@@ -96,12 +96,14 @@ def apply_circular_mask(img: np.ndarray) -> np.ndarray:
     return result
 
 
-def preprocess_image(img: np.ndarray,
-                     img_size: int = config.IMG_SIZE,
-                     use_ben_graham: bool = True,
-                     use_clahe: bool = True,
-                     use_crop: bool = True,
-                     use_circular_mask: bool = True) -> np.ndarray:
+def preprocess_image(
+    img: np.ndarray,
+    img_size: int = config.IMG_SIZE,
+    use_ben_graham: bool = True,
+    use_clahe: bool = True,
+    use_crop: bool = True,
+    use_circular_mask: bool = True,
+) -> np.ndarray:
     """
     Full preprocessing pipeline for a single retinal image.
 
@@ -147,9 +149,7 @@ def preprocess_image(img: np.ndarray,
     return img
 
 
-def load_and_preprocess(image_path: str,
-                        img_size: int = config.IMG_SIZE,
-                        **kwargs) -> np.ndarray:
+def load_and_preprocess(image_path: str, img_size: int = config.IMG_SIZE, **kwargs) -> np.ndarray:
     """Convenience: read an image file from disk and preprocess it."""
     img = cv2.imread(image_path)
     if img is None:

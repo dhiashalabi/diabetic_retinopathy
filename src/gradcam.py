@@ -7,11 +7,11 @@ for clinical trust and model debugging.
 """
 
 import cv2
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import matplotlib.pyplot as plt
 
 from . import config
 
@@ -49,12 +49,8 @@ class GradCAM:
         def backward_hook(module, grad_input, grad_output):
             self.gradients = grad_output[0].detach()
 
-        self._handles.append(
-            self.target_layer.register_forward_hook(forward_hook)
-        )
-        self._handles.append(
-            self.target_layer.register_full_backward_hook(backward_hook)
-        )
+        self._handles.append(self.target_layer.register_forward_hook(forward_hook))
+        self._handles.append(self.target_layer.register_full_backward_hook(backward_hook))
 
     def remove_hooks(self):
         """Remove all registered hooks to prevent memory leaks."""
@@ -101,8 +97,10 @@ class GradCAM:
 
         # Upsample to input resolution
         cam = F.interpolate(
-            cam, size=input_tensor.shape[2:],
-            mode="bilinear", align_corners=False,
+            cam,
+            size=input_tensor.shape[2:],
+            mode="bilinear",
+            align_corners=False,
         )
         cam = cam.squeeze().cpu().numpy()
 
@@ -156,10 +154,7 @@ def get_target_layer(model) -> nn.Module:
 
     For EfficientNet-B4, this is the last block in ``model.backbone.blocks``.
     """
-    if hasattr(model, "backbone"):
-        backbone = model.backbone
-    else:
-        backbone = model
+    backbone = model.backbone if hasattr(model, "backbone") else model
 
     if hasattr(backbone, "blocks"):
         return backbone.blocks[-1]
@@ -224,7 +219,8 @@ def visualize_gradcam(
 
     axes[2].imshow(overlay)
     axes[2].set_title(
-        f"Prediction: {pred_name} ({confidence:.1%})", fontsize=13,
+        f"Prediction: {pred_name} ({confidence:.1%})",
+        fontsize=13,
     )
     axes[2].axis("off")
 
@@ -265,7 +261,9 @@ def visualize_gradcam_grid(
                 if len(cls_idx) == 0:
                     continue
                 chosen = np.random.choice(
-                    cls_idx, size=min(n_per_class, len(cls_idx)), replace=False,
+                    cls_idx,
+                    size=min(n_per_class, len(cls_idx)),
+                    replace=False,
                 )
                 indices.extend(chosen.tolist())
 
@@ -294,7 +292,9 @@ def visualize_gradcam_grid(
                     img_np = img_tensor
                     img_arr = img_np.astype(np.float32) / 255.0
                     img_arr = (img_arr - np.array(config.IMG_MEAN)) / np.array(config.IMG_STD)
-                    input_t = torch.from_numpy(img_arr).permute(2, 0, 1).unsqueeze(0).float().to(device)
+                    input_t = (
+                        torch.from_numpy(img_arr).permute(2, 0, 1).unsqueeze(0).float().to(device)
+                    )
 
                 heatmap = cam.generate_heatmap(input_t, target_class=label)
                 overlay = cam.overlay_heatmap(img_np, heatmap)
@@ -302,7 +302,8 @@ def visualize_gradcam_grid(
                 ax.imshow(overlay)
                 ax.set_title(
                     f"{class_names[label]}",
-                    fontsize=10, fontweight="bold",
+                    fontsize=10,
+                    fontweight="bold",
                 )
                 ax.axis("off")
                 sample_idx += 1

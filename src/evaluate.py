@@ -14,31 +14,30 @@ Metrics:
 """
 
 import os
-from typing import Optional
 
 import cv2
+import matplotlib.pyplot as plt
 import numpy as np
+import seaborn as sns
 import torch
 import torch.nn as nn
-import matplotlib.pyplot as plt
-import seaborn as sns
-from torch.utils.data import DataLoader
-from torch.amp import autocast
 from sklearn.metrics import (
+    accuracy_score,
+    auc,
     classification_report,
-    confusion_matrix,
     cohen_kappa_score,
+    confusion_matrix,
     roc_auc_score,
     roc_curve,
-    auc,
-    accuracy_score,
 )
 from sklearn.preprocessing import label_binarize
+from torch.amp import autocast
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from . import config
+from .augmentations import get_tta_transforms, get_valid_transforms
 from .preprocessing import preprocess_image
-from .augmentations import get_valid_transforms, get_tta_transforms
 
 PLOT_DPI = 300
 
@@ -46,6 +45,7 @@ PLOT_DPI = 300
 # -----------------------------------------------------------------------
 # Prediction helpers
 # -----------------------------------------------------------------------
+
 
 @torch.no_grad()
 def predict(
@@ -80,6 +80,7 @@ def predict(
 # Metric computation
 # -----------------------------------------------------------------------
 
+
 def compute_metrics(
     y_true: np.ndarray,
     y_pred: np.ndarray,
@@ -91,16 +92,26 @@ def compute_metrics(
     acc = accuracy_score(y_true, y_pred)
 
     report = classification_report(
-        y_true, y_pred, target_names=class_names, digits=4, output_dict=True,
+        y_true,
+        y_pred,
+        target_names=class_names,
+        digits=4,
+        output_dict=True,
     )
     report_str = classification_report(
-        y_true, y_pred, target_names=class_names, digits=4,
+        y_true,
+        y_pred,
+        target_names=class_names,
+        digits=4,
     )
 
     y_true_bin = label_binarize(y_true, classes=list(range(config.NUM_CLASSES)))
     try:
         roc_auc = roc_auc_score(
-            y_true_bin, y_proba, multi_class="ovr", average="weighted",
+            y_true_bin,
+            y_proba,
+            multi_class="ovr",
+            average="weighted",
         )
     except ValueError:
         roc_auc = float("nan")
@@ -118,12 +129,13 @@ def compute_metrics(
 # Plotting functions
 # -----------------------------------------------------------------------
 
+
 def plot_confusion_matrix(
     y_true: np.ndarray,
     y_pred: np.ndarray,
     class_names: list[str] = config.CLASS_NAMES,
     normalize: bool = False,
-    save_path: Optional[str] = None,
+    save_path: str | None = None,
 ):
     """Confusion matrix heatmap (absolute or row-normalised)."""
     cm = confusion_matrix(y_true, y_pred)
@@ -139,8 +151,13 @@ def plot_confusion_matrix(
 
     fig, ax = plt.subplots(figsize=(9, 7))
     sns.heatmap(
-        cm, annot=True, fmt=fmt, cmap="Blues",
-        xticklabels=class_names, yticklabels=class_names, ax=ax,
+        cm,
+        annot=True,
+        fmt=fmt,
+        cmap="Blues",
+        xticklabels=class_names,
+        yticklabels=class_names,
+        ax=ax,
     )
     ax.set_xlabel("Predicted", fontsize=12)
     ax.set_ylabel("True", fontsize=12)
@@ -160,7 +177,7 @@ def plot_roc_curves(
     y_true: np.ndarray,
     y_proba: np.ndarray,
     class_names: list[str] = config.CLASS_NAMES,
-    save_path: Optional[str] = None,
+    save_path: str | None = None,
 ):
     """Per-class ROC curves with AUC annotations."""
     y_true_bin = label_binarize(y_true, classes=list(range(config.NUM_CLASSES)))
@@ -170,8 +187,7 @@ def plot_roc_curves(
     for i in range(n_classes):
         fpr, tpr, _ = roc_curve(y_true_bin[:, i], y_proba[:, i])
         roc_auc_i = auc(fpr, tpr)
-        ax.plot(fpr, tpr, linewidth=2,
-                label=f"{class_names[i]} (AUC = {roc_auc_i:.3f})")
+        ax.plot(fpr, tpr, linewidth=2, label=f"{class_names[i]} (AUC = {roc_auc_i:.3f})")
 
     ax.plot([0, 1], [0, 1], "k--", linewidth=1, alpha=0.5)
     ax.set_xlabel("False Positive Rate", fontsize=12)
@@ -190,7 +206,7 @@ def plot_roc_curves(
 
 def plot_training_curves(
     history: dict[str, list],
-    save_path: Optional[str] = None,
+    save_path: str | None = None,
 ):
     """Plot loss, accuracy, and QWK over training epochs."""
     epochs = range(1, len(history["train_loss"]) + 1)
@@ -229,7 +245,10 @@ def plot_training_curves(
     if p1_end < len(history["train_loss"]):
         for ax in axes:
             ax.axvline(
-                p1_end + 0.5, color="grey", ls="--", alpha=0.6,
+                p1_end + 0.5,
+                color="grey",
+                ls="--",
+                alpha=0.6,
                 label="Fine-tune start" if ax == axes[0] else None,
             )
         axes[0].legend()
@@ -249,7 +268,7 @@ def show_misclassified(
     dataset,
     n_images: int = 16,
     class_names: list[str] = config.CLASS_NAMES,
-    save_path: Optional[str] = None,
+    save_path: str | None = None,
 ):
     """Display a gallery of the most-confident misclassified images."""
     y_true, y_pred, y_proba = predict(model, loader, device)
@@ -282,9 +301,9 @@ def show_misclassified(
         ax.imshow(img_np)
         conf = y_proba[idx].max()
         ax.set_title(
-            f"T: {class_names[y_true[idx]]}\n"
-            f"P: {class_names[y_pred[idx]]} ({conf:.0%})",
-            fontsize=8, color="red",
+            f"T: {class_names[y_true[idx]]}\nP: {class_names[y_pred[idx]]} ({conf:.0%})",
+            fontsize=8,
+            color="red",
         )
         ax.axis("off")
 
@@ -328,21 +347,28 @@ def full_evaluation(
     print(f"\n{metrics['classification_report_str']}")
 
     plot_confusion_matrix(
-        y_true, y_pred,
+        y_true,
+        y_pred,
         save_path=os.path.join(save_dir, "confusion_matrix.png"),
     )
     plot_confusion_matrix(
-        y_true, y_pred, normalize=True,
+        y_true,
+        y_pred,
+        normalize=True,
         save_path=os.path.join(save_dir, "confusion_matrix_normalized.png"),
     )
     plot_roc_curves(
-        y_true, y_proba,
+        y_true,
+        y_proba,
         save_path=os.path.join(save_dir, "roc_curves.png"),
     )
 
     if test_dataset is not None:
         show_misclassified(
-            model, test_loader, device, test_dataset,
+            model,
+            test_loader,
+            device,
+            test_dataset,
             save_path=os.path.join(save_dir, "misclassified.png"),
         )
 
@@ -353,6 +379,7 @@ def full_evaluation(
 # Single-image inference
 # -----------------------------------------------------------------------
 
+
 def predict_single_image(
     model: nn.Module,
     image_path: str,
@@ -360,7 +387,7 @@ def predict_single_image(
     class_names: list[str] = config.CLASS_NAMES,
     img_size: int = config.IMG_SIZE,
     show: bool = True,
-    save_path: Optional[str] = None,
+    save_path: str | None = None,
 ) -> dict:
     """
     Predict DR severity for a single retinal image.
@@ -369,10 +396,10 @@ def predict_single_image(
     Optionally displays the image alongside a probability bar chart.
     """
     severity_desc = {
-        "No_DR":            "0 - No Diabetic Retinopathy",
-        "Mild":             "1 - Mild Non-Proliferative DR",
-        "Moderate":         "2 - Moderate Non-Proliferative DR",
-        "Severe":           "3 - Severe Non-Proliferative DR",
+        "No_DR": "0 - No Diabetic Retinopathy",
+        "Mild": "1 - Mild Non-Proliferative DR",
+        "Moderate": "2 - Moderate Non-Proliferative DR",
+        "Severe": "3 - Severe Non-Proliferative DR",
         "Proliferative_DR": "4 - Proliferative DR",
     }
 
@@ -404,7 +431,9 @@ def predict_single_image(
 
     if show:
         fig, (ax1, ax2) = plt.subplots(
-            1, 2, figsize=(13, 5),
+            1,
+            2,
+            figsize=(13, 5),
             gridspec_kw={"width_ratios": [1, 1.4]},
         )
 
@@ -415,10 +444,7 @@ def predict_single_image(
         )
         ax1.axis("off")
 
-        colors = [
-            "#2ecc71" if i == pred_idx else "#95a5a6"
-            for i in range(len(class_names))
-        ]
+        colors = ["#2ecc71" if i == pred_idx else "#95a5a6" for i in range(len(class_names))]
         bars = ax2.barh(class_names, probs, color=colors, edgecolor="black", linewidth=0.5)
         ax2.set_xlim(0, 1)
         ax2.set_xlabel("Probability", fontsize=12)
@@ -437,6 +463,7 @@ def predict_single_image(
 # -----------------------------------------------------------------------
 # Test-Time Augmentation
 # -----------------------------------------------------------------------
+
 
 @torch.no_grad()
 def predict_with_tta(
@@ -463,12 +490,18 @@ def predict_with_tta(
 
     for tfm in tqdm(tta_transforms, desc="TTA transforms"):
         ds = DRDataset(
-            dataset_df, images_dir=images_dir,
-            transform=tfm, preprocessing=True, img_size=img_size,
+            dataset_df,
+            images_dir=images_dir,
+            transform=tfm,
+            preprocessing=True,
+            img_size=img_size,
         )
         loader = DataLoader(
-            ds, batch_size=batch_size, shuffle=False,
-            num_workers=config.NUM_WORKERS, pin_memory=config.PIN_MEMORY,
+            ds,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=config.NUM_WORKERS,
+            pin_memory=config.PIN_MEMORY,
         )
 
         probs_list = []

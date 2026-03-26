@@ -6,13 +6,12 @@ can be served by any framework (FastAPI, Flask, Django, etc.) using only
 onnxruntime — no PyTorch or timm required at inference time.
 """
 
-import os
 import json
-from typing import Optional
+import os
 
 import numpy as np
-import torch
 import onnx
+import torch
 
 from . import config
 from .model import build_model
@@ -22,8 +21,8 @@ logger = get_logger(__name__)
 
 
 def export_to_onnx(
-    checkpoint_path: Optional[str] = None,
-    output_path: Optional[str] = None,
+    checkpoint_path: str | None = None,
+    output_path: str | None = None,
     img_size: int = config.IMG_SIZE,
     opset_version: int = 17,
 ) -> str:
@@ -48,15 +47,14 @@ def export_to_onnx(
     """
     if checkpoint_path is None:
         checkpoint_path = os.path.join(
-            config.CHECKPOINTS_DIR, "best_model_phase2.pth",
+            config.CHECKPOINTS_DIR,
+            "best_model_phase2.pth",
         )
     if output_path is None:
         output_path = os.path.join(config.CHECKPOINTS_DIR, "model.onnx")
 
     if not os.path.isfile(checkpoint_path):
-        raise FileNotFoundError(
-            f"Checkpoint not found: {checkpoint_path}. Train the model first."
-        )
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}. Train the model first.")
 
     device = torch.device("cpu")
     model = build_model(pretrained=False)
@@ -108,8 +106,7 @@ def export_to_onnx(
 
     file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
     logger.info(
-        f"ONNX model exported: {output_path} ({file_size_mb:.1f} MB, "
-        f"opset {opset_version})"
+        f"ONNX model exported: {output_path} ({file_size_mb:.1f} MB, opset {opset_version})"
     )
 
     return os.path.abspath(output_path)
@@ -133,16 +130,15 @@ def _validate_export(
     max_diff = np.abs(torch_out - ort_out).max()
     if max_diff > atol:
         logger.warning(
-            f"ONNX validation: max difference {max_diff:.2e} exceeds "
-            f"tolerance {atol:.2e}"
+            f"ONNX validation: max difference {max_diff:.2e} exceeds tolerance {atol:.2e}"
         )
     else:
         logger.info(f"ONNX validation passed (max diff: {max_diff:.2e})")
 
 
 def test_onnx_inference(
-    onnx_path: Optional[str] = None,
-    image_path: Optional[str] = None,
+    onnx_path: str | None = None,
+    image_path: str | None = None,
 ) -> dict:
     """
     Run inference on a single image using the exported ONNX model.
@@ -171,8 +167,9 @@ def test_onnx_inference(
 
     if image_path is not None:
         import cv2
-        from .preprocessing import preprocess_image
+
         from .augmentations import get_valid_transforms
+        from .preprocessing import preprocess_image
 
         img = cv2.imread(image_path)
         if img is None:
@@ -183,7 +180,10 @@ def test_onnx_inference(
         tensor = transform(image=preprocessed)["image"].unsqueeze(0).numpy()
     else:
         tensor = np.random.randn(
-            1, 3, config.IMG_SIZE, config.IMG_SIZE,
+            1,
+            3,
+            config.IMG_SIZE,
+            config.IMG_SIZE,
         ).astype(np.float32)
 
     logits = session.run(None, {"input": tensor})[0]
@@ -194,15 +194,10 @@ def test_onnx_inference(
     result = {
         "predicted_class": config.CLASS_NAMES[pred_idx],
         "confidence": float(probs[pred_idx]),
-        "probabilities": {
-            name: float(p) for name, p in zip(config.CLASS_NAMES, probs)
-        },
+        "probabilities": {name: float(p) for name, p in zip(config.CLASS_NAMES, probs)},
     }
 
-    logger.info(
-        f"Prediction: {result['predicted_class']} "
-        f"({result['confidence']:.1%})"
-    )
+    logger.info(f"Prediction: {result['predicted_class']} ({result['confidence']:.1%})")
     return result
 
 
