@@ -8,10 +8,10 @@ Handles three scenarios:
   ~/.kaggle/kaggle.json, or interactive Colab upload
 """
 
-import os
 import logging
-import zipfile
+import os
 import shutil
+import zipfile
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +21,7 @@ KAGGLE_DATASET = "tanlikesmath/diabetic-retinopathy-resized"
 def _is_colab() -> bool:
     try:
         import google.colab  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -38,6 +39,7 @@ def _setup_colab_kaggle_credentials() -> None:
     if _has_kaggle_credentials():
         return
     from google.colab import files
+
     print("No Kaggle credentials found. Upload your kaggle.json:")
     uploaded = files.upload()
     if "kaggle.json" not in uploaded:
@@ -126,6 +128,7 @@ def ensure_dataset(data_dir: str | None = None) -> str:
     """
     if data_dir is None:
         from . import config
+
         data_dir = config.DATA_DIR
 
     if _dataset_exists(data_dir):

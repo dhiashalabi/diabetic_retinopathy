@@ -10,15 +10,14 @@ Balancing strategy (multi-pronged):
 """
 
 import os
-from typing import Optional
 
 import cv2
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 from sklearn.model_selection import train_test_split
 from sklearn.utils.class_weight import compute_class_weight
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 from . import config
 from .preprocessing import preprocess_image
@@ -31,6 +30,7 @@ _EXTENSIONS = (".jpeg", ".jpg", ".png", ".JPEG", ".JPG")
 # -----------------------------------------------------------------------
 # Patient-level stratified split
 # -----------------------------------------------------------------------
+
 
 def load_and_split_dataframe(
     csv_path: str = config.LABELS_CSV,
@@ -107,6 +107,7 @@ def load_and_split_dataframe(
 # Class balancing utilities
 # -----------------------------------------------------------------------
 
+
 def compute_class_weights(labels: np.ndarray) -> torch.Tensor:
     """
     Compute balanced class weights using sklearn's 'balanced' mode.
@@ -137,6 +138,7 @@ def compute_sample_weights(labels: np.ndarray) -> np.ndarray:
 # -----------------------------------------------------------------------
 # PyTorch Dataset
 # -----------------------------------------------------------------------
+
 
 class DRDataset(Dataset):
     """
@@ -193,8 +195,7 @@ class DRDataset(Dataset):
         if p is not None:
             return p
         raise FileNotFoundError(
-            f"Image not found for '{img_id}' in {self.images_dir} "
-            f"(tried .jpeg/.jpg/.png)"
+            f"Image not found for '{img_id}' in {self.images_dir} (tried .jpeg/.jpg/.png)"
         )
 
     def __len__(self) -> int:
@@ -230,10 +231,11 @@ class DRDataset(Dataset):
 # DataLoader factory
 # -----------------------------------------------------------------------
 
+
 def create_dataloaders(
     train_df: pd.DataFrame,
     valid_df: pd.DataFrame,
-    test_df: Optional[pd.DataFrame] = None,
+    test_df: pd.DataFrame | None = None,
     train_transform=None,
     valid_transform=None,
     images_dir: str = config.IMAGES_DIR,
@@ -258,11 +260,15 @@ def create_dataloaders(
     dict with keys "train", "valid", and optionally "test".
     """
     train_ds = DRDataset(
-        train_df, images_dir, transform=train_transform,
+        train_df,
+        images_dir,
+        transform=train_transform,
         preprocessing=preprocessing,
     )
     valid_ds = DRDataset(
-        valid_df, images_dir, transform=valid_transform,
+        valid_df,
+        images_dir,
+        transform=valid_transform,
         preprocessing=preprocessing,
     )
 
@@ -311,7 +317,9 @@ def create_dataloaders(
 
     if test_df is not None:
         test_ds = DRDataset(
-            test_df, images_dir, transform=valid_transform,
+            test_df,
+            images_dir,
+            transform=valid_transform,
             preprocessing=preprocessing,
         )
         loaders["test"] = DataLoader(
@@ -327,7 +335,7 @@ def create_dataloaders(
 def preprocess_images_to_cache(
     df: pd.DataFrame,
     source_images_dir: str = config.IMAGES_DIR,
-    cache_dir: Optional[str] = None,
+    cache_dir: str | None = None,
     img_size: int = config.IMG_SIZE,
     overwrite: bool = False,
 ) -> str:
@@ -370,6 +378,9 @@ def preprocess_images_to_cache(
 
     _logger.info(
         "Preprocessing cache ready at %s | written=%d skipped=%d missing=%d",
-        cache_dir, written, skipped, missing
+        cache_dir,
+        written,
+        skipped,
+        missing,
     )
     return cache_dir

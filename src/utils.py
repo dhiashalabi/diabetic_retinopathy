@@ -2,9 +2,9 @@
 Utility helpers: reproducibility, device selection, logging.
 """
 
+import logging
 import os
 import random
-import logging
 
 import numpy as np
 import torch

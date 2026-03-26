@@ -10,6 +10,7 @@ import os
 # ---------------------------------------------------------------------------
 try:
     from google.colab import drive  # noqa: F401
+
     IS_COLAB = True
 except ImportError:
     IS_COLAB = False
@@ -28,10 +29,7 @@ else:
 # Handle nested folder structure from Kaggle zip (resized_train_cropped/resized_train_cropped/)
 _images_candidate = os.path.join(DATA_DIR, "resized_train_cropped")
 _images_nested = os.path.join(_images_candidate, "resized_train_cropped")
-if os.path.isdir(_images_nested):
-    IMAGES_DIR = _images_nested
-else:
-    IMAGES_DIR = _images_candidate
+IMAGES_DIR = _images_nested if os.path.isdir(_images_nested) else _images_candidate
 
 # Outputs always on Drive (Colab) or project root so they persist
 OUTPUTS_DIR = os.path.join(PROJECT_ROOT, "outputs")

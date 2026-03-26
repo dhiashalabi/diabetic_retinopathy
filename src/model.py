@@ -10,9 +10,9 @@ Architecture choices targeting high accuracy:
 
 import logging
 
+import timm
 import torch
 import torch.nn as nn
-import timm
 
 from . import config
 
@@ -37,7 +37,9 @@ class DRModel(nn.Module):
     ):
         super().__init__()
         self.backbone = timm.create_model(
-            model_name, pretrained=pretrained, num_classes=0,
+            model_name,
+            pretrained=pretrained,
+            num_classes=0,
         )
         in_features = self.backbone.num_features  # 1792 for efficientnet_b4
 
@@ -77,6 +79,7 @@ class DRModel(nn.Module):
 # Freeze / unfreeze utilities
 # -----------------------------------------------------------------------
 
+
 def freeze_backbone(model: DRModel) -> None:
     """Freeze the entire backbone — only the head is trainable."""
     for param in model.backbone.parameters():
@@ -93,15 +96,36 @@ def unfreeze_backbone(model: DRModel, from_block: str = config.PHASE2_UNFREEZE_F
     small relative to the pretrained regime.
     """
     found = False
+    normalized = str(from_block).strip().lower().replace("_", "")
+    candidate_prefixes: list[str] = []
+
+    # Support common EfficientNet user inputs like "block5" by mapping to timm names.
+    if normalized.startswith("block") and normalized[5:].isdigit():
+        idx = int(normalized[5:])
+        candidate_prefixes.append(f"blocks.{idx}")
+    candidate_prefixes.extend(
+        [
+            from_block,
+            from_block.replace("_", "."),
+        ]
+    )
+
     for name, param in model.backbone.named_parameters():
-        if from_block in name:
+        if not found and any(
+            name.startswith(prefix) or prefix in name for prefix in candidate_prefixes
+        ):
             found = True
         param.requires_grad = found
 
     if not found:
         logger.warning(
             f"Block '{from_block}' not found in backbone parameters. "
-            f"All backbone layers remain frozen."
+            f"Tried prefixes: {candidate_prefixes}. All backbone layers remain frozen."
+        )
+    else:
+        logger.info(
+            f"Backbone unfreezing started from '{from_block}' "
+            f"(matched prefixes: {candidate_prefixes})."
         )
 
     freeze_batchnorm(model)

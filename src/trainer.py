@@ -10,17 +10,16 @@ Designed for maximum accuracy on the DR grading task:
 - Mixed-precision training for speed
 """
 
-import os
 import json
+import os
 import time
-from typing import Optional
 
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
-from torch.amp import GradScaler, autocast
 from sklearn.metrics import cohen_kappa_score
+from torch.amp import GradScaler, autocast
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from . import config
@@ -38,21 +37,22 @@ class LabelSmoothingCrossEntropy(nn.Module):
     - Class weights up-weight rare severe/proliferative cases
     """
 
-    def __init__(self, num_classes: int = config.NUM_CLASSES,
-                 smoothing: float = config.LABEL_SMOOTHING,
-                 weight: Optional[torch.Tensor] = None):
+    def __init__(
+        self,
+        num_classes: int = config.NUM_CLASSES,
+        smoothing: float = config.LABEL_SMOOTHING,
+        weight: torch.Tensor | None = None,
+    ):
         super().__init__()
         self.smoothing = smoothing
         self.num_classes = num_classes
         self.weight = weight
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        if self.weight is not None:
-            weight = self.weight.to(pred.device)
-        else:
-            weight = None
+        weight = self.weight.to(pred.device) if self.weight is not None else None
         return nn.functional.cross_entropy(
-            pred, target,
+            pred,
+            target,
             weight=weight,
             label_smoothing=self.smoothing,
         )
@@ -66,8 +66,7 @@ class CosineWarmupScheduler:
     first few epochs of fine-tuning.
     """
 
-    def __init__(self, optimizer, warmup_epochs: int, total_epochs: int,
-                 min_lr: float = 1e-7):
+    def __init__(self, optimizer, warmup_epochs: int, total_epochs: int, min_lr: float = 1e-7):
         self.optimizer = optimizer
         self.warmup_epochs = warmup_epochs
         self.total_epochs = total_epochs
@@ -80,9 +79,7 @@ class CosineWarmupScheduler:
             factor = (epoch + 1) / self.warmup_epochs
         else:
             # Cosine decay
-            progress = (epoch - self.warmup_epochs) / max(
-                1, self.total_epochs - self.warmup_epochs
-            )
+            progress = (epoch - self.warmup_epochs) / max(1, self.total_epochs - self.warmup_epochs)
             factor = 0.5 * (1.0 + np.cos(np.pi * progress))
 
         for pg, base_lr in zip(self.optimizer.param_groups, self.base_lrs):
@@ -95,8 +92,12 @@ class CosineWarmupScheduler:
 class EarlyStopping:
     """Stop training when the monitored metric stops improving."""
 
-    def __init__(self, patience: int = config.EARLY_STOPPING_PATIENCE,
-                 mode: str = "max", min_delta: float = 1e-4):
+    def __init__(
+        self,
+        patience: int = config.EARLY_STOPPING_PATIENCE,
+        mode: str = "max",
+        min_delta: float = 1e-4,
+    ):
         self.patience = patience
         self.mode = mode
         self.min_delta = min_delta
@@ -153,15 +154,20 @@ class Trainer:
         self,
         model: nn.Module,
         device: torch.device,
-        class_weights: Optional[torch.Tensor] = None,
+        class_weights: torch.Tensor | None = None,
     ):
         self.model = model.to(device)
         self.device = device
         self.class_weights = class_weights
         self.scaler = GradScaler(device.type, enabled=device.type == "cuda")
         self.history: dict[str, list] = {
-            "train_loss": [], "train_acc": [], "train_kappa": [],
-            "val_loss": [], "val_acc": [], "val_kappa": [], "lr": [],
+            "train_loss": [],
+            "train_acc": [],
+            "train_kappa": [],
+            "val_loss": [],
+            "val_acc": [],
+            "val_kappa": [],
+            "lr": [],
         }
         self.best_kappa = -1.0
 
@@ -172,13 +178,16 @@ class Trainer:
         )
 
     def train_one_epoch(
-        self, loader: DataLoader, optimizer: torch.optim.Optimizer,
+        self,
+        loader: DataLoader,
+        optimizer: torch.optim.Optimizer,
         criterion: nn.Module,
     ) -> dict:
         self.model.train()
 
         # Keep BN frozen in backbone during fine-tune
         from .model import DRModel
+
         if isinstance(self.model, DRModel):
             for module in self.model.backbone.modules():
                 if isinstance(module, (nn.BatchNorm2d, nn.SyncBatchNorm)):
@@ -204,7 +213,8 @@ class Trainer:
             self.scaler.scale(loss).backward()
             self.scaler.unscale_(optimizer)
             nn.utils.clip_grad_norm_(
-                self.model.parameters(), config.GRADIENT_CLIP_NORM,
+                self.model.parameters(),
+                config.GRADIENT_CLIP_NORM,
             )
             self.scaler.step(optimizer)
             self.scaler.update()
@@ -271,10 +281,10 @@ class Trainer:
 
         return {"loss": epoch_loss, "acc": epoch_acc, "kappa": epoch_kappa}
 
-    def _save_checkpoint(self, epoch: int, phase: str, metrics: dict,
-                         optimizer=None, scaler=None):
+    def _save_checkpoint(self, epoch: int, phase: str, metrics: dict, optimizer=None, scaler=None):
         path = os.path.join(
-            config.CHECKPOINTS_DIR, f"best_model_{phase}.pth",
+            config.CHECKPOINTS_DIR,
+            f"best_model_{phase}.pth",
         )
         ckpt = {
             "epoch": epoch,
@@ -290,9 +300,16 @@ class Trainer:
         logger.info(f"Checkpoint saved: {path} (QWK={metrics['kappa']:.4f})")
 
     def _save_resume_state(
-        self, *, phase: str, next_epoch: int, epochs: int,
-        lr: float, weight_decay: float, warmup_epochs: int,
-        optimizer: torch.optim.Optimizer, early_stop: EarlyStopping,
+        self,
+        *,
+        phase: str,
+        next_epoch: int,
+        epochs: int,
+        lr: float,
+        weight_decay: float,
+        warmup_epochs: int,
+        optimizer: torch.optim.Optimizer,
+        early_stop: EarlyStopping,
         phase_done: bool,
     ) -> None:
         """Save full training state after each epoch for crash recovery."""
@@ -339,7 +356,10 @@ class Trainer:
             logger.info("Training complete — resume state cleared.")
 
     def resume_from_checkpoint(
-        self, path: str, optimizer=None, scaler=None,
+        self,
+        path: str,
+        optimizer=None,
+        scaler=None,
     ) -> int:
         """
         Restore model, optimizer, and scaler from a checkpoint.
@@ -358,8 +378,7 @@ class Trainer:
         self.best_kappa = ckpt["metrics"].get("kappa", -1.0)
         resume_epoch = ckpt["epoch"] + 1
         logger.info(
-            f"Resumed from {path} (epoch {resume_epoch}, "
-            f"QWK={ckpt['metrics']['kappa']:.4f})"
+            f"Resumed from {path} (epoch {resume_epoch}, QWK={ckpt['metrics']['kappa']:.4f})"
         )
         return resume_epoch
 
@@ -374,8 +393,8 @@ class Trainer:
         warmup_epochs: int = 0,
         *,
         _start_epoch: int = 0,
-        _optimizer: Optional[torch.optim.Optimizer] = None,
-        _early_stop: Optional[EarlyStopping] = None,
+        _optimizer: torch.optim.Optimizer | None = None,
+        _early_stop: EarlyStopping | None = None,
     ) -> bool:
         """
         Run one training phase (head-only or fine-tuning).
@@ -392,26 +411,30 @@ class Trainer:
         else:
             optimizer = torch.optim.AdamW(
                 filter(lambda p: p.requires_grad, self.model.parameters()),
-                lr=lr, weight_decay=weight_decay,
+                lr=lr,
+                weight_decay=weight_decay,
             )
 
         scheduler = CosineWarmupScheduler(
-            optimizer, warmup_epochs=warmup_epochs, total_epochs=epochs,
+            optimizer,
+            warmup_epochs=warmup_epochs,
+            total_epochs=epochs,
         )
         early_stop = _early_stop or EarlyStopping(
-            patience=config.EARLY_STOPPING_PATIENCE, mode="max",
+            patience=config.EARLY_STOPPING_PATIENCE,
+            mode="max",
         )
 
         remaining = epochs - _start_epoch
-        logger.info(f"\n{'='*60}")
+        logger.info(f"\n{'=' * 60}")
         if _start_epoch > 0:
             logger.info(
-                f"Phase: {phase.upper()} | Resuming from epoch {_start_epoch+1}/{epochs} "
+                f"Phase: {phase.upper()} | Resuming from epoch {_start_epoch + 1}/{epochs} "
                 f"({remaining} remaining) | LR: {lr}"
             )
         else:
             logger.info(f"Phase: {phase.upper()} | Epochs: {epochs} | LR: {lr}")
-        logger.info(f"{'='*60}")
+        logger.info(f"{'=' * 60}")
 
         early_stopped = False
 
@@ -422,7 +445,9 @@ class Trainer:
             current_lr = optimizer.param_groups[0]["lr"]
 
             train_metrics = self.train_one_epoch(
-                train_loader, optimizer, criterion,
+                train_loader,
+                optimizer,
+                criterion,
             )
             val_metrics = self.validate(valid_loader, criterion)
 
@@ -435,7 +460,7 @@ class Trainer:
 
             elapsed = time.time() - t0
             logger.info(
-                f"Epoch {epoch+1:02d}/{epochs} ({elapsed:.0f}s) | "
+                f"Epoch {epoch + 1:02d}/{epochs} ({elapsed:.0f}s) | "
                 f"LR: {current_lr:.2e} | "
                 f"Train Loss: {train_metrics['loss']:.4f} Acc: {train_metrics['acc']:.4f} "
                 f"QWK: {train_metrics['kappa']:.4f} | "
@@ -446,29 +471,40 @@ class Trainer:
             if val_metrics["kappa"] > self.best_kappa:
                 self.best_kappa = val_metrics["kappa"]
                 self._save_checkpoint(
-                    epoch, phase, val_metrics,
-                    optimizer=optimizer, scaler=self.scaler,
+                    epoch,
+                    phase,
+                    val_metrics,
+                    optimizer=optimizer,
+                    scaler=self.scaler,
                 )
 
             if early_stop(val_metrics["kappa"]):
                 logger.info(
-                    f"Early stopping at epoch {epoch+1} "
-                    f"(best QWK: {early_stop.best_score:.4f})"
+                    f"Early stopping at epoch {epoch + 1} (best QWK: {early_stop.best_score:.4f})"
                 )
                 early_stopped = True
                 self._save_resume_state(
-                    phase=phase, next_epoch=epoch + 1, epochs=epochs,
-                    lr=lr, weight_decay=weight_decay,
-                    warmup_epochs=warmup_epochs, optimizer=optimizer,
-                    early_stop=early_stop, phase_done=True,
+                    phase=phase,
+                    next_epoch=epoch + 1,
+                    epochs=epochs,
+                    lr=lr,
+                    weight_decay=weight_decay,
+                    warmup_epochs=warmup_epochs,
+                    optimizer=optimizer,
+                    early_stop=early_stop,
+                    phase_done=True,
                 )
                 break
 
             # Persist resume state after every successful epoch
             self._save_resume_state(
-                phase=phase, next_epoch=epoch + 1, epochs=epochs,
-                lr=lr, weight_decay=weight_decay,
-                warmup_epochs=warmup_epochs, optimizer=optimizer,
+                phase=phase,
+                next_epoch=epoch + 1,
+                epochs=epochs,
+                lr=lr,
+                weight_decay=weight_decay,
+                warmup_epochs=warmup_epochs,
+                optimizer=optimizer,
                 early_stop=early_stop,
                 phase_done=(epoch + 1 == epochs),
             )
@@ -496,7 +532,7 @@ class Trainer:
         Phase 1 — head-only (high LR, no warmup)
         Phase 2 — fine-tune from block5 (low LR, warmup)
         """
-        from .model import freeze_backbone, unfreeze_backbone, count_parameters
+        from .model import count_parameters, freeze_backbone, unfreeze_backbone
 
         skip_phase1 = False
         p1_start_epoch = 0
@@ -515,11 +551,13 @@ class Trainer:
                 freeze_backbone(self.model)
                 p1_optimizer = torch.optim.AdamW(
                     filter(lambda p: p.requires_grad, self.model.parameters()),
-                    lr=state["lr"], weight_decay=state["weight_decay"],
+                    lr=state["lr"],
+                    weight_decay=state["weight_decay"],
                 )
                 p1_optimizer.load_state_dict(state["optimizer_state_dict"])
                 p1_early_stop = EarlyStopping(
-                    patience=config.EARLY_STOPPING_PATIENCE, mode="max",
+                    patience=config.EARLY_STOPPING_PATIENCE,
+                    mode="max",
                 )
                 p1_early_stop.load_state_dict(state["early_stop"])
 
@@ -532,11 +570,13 @@ class Trainer:
                 unfreeze_backbone(self.model, from_block=config.PHASE2_UNFREEZE_FROM)
                 p2_optimizer = torch.optim.AdamW(
                     filter(lambda p: p.requires_grad, self.model.parameters()),
-                    lr=state["lr"], weight_decay=state["weight_decay"],
+                    lr=state["lr"],
+                    weight_decay=state["weight_decay"],
                 )
                 p2_optimizer.load_state_dict(state["optimizer_state_dict"])
                 p2_early_stop = EarlyStopping(
-                    patience=config.EARLY_STOPPING_PATIENCE, mode="max",
+                    patience=config.EARLY_STOPPING_PATIENCE,
+                    mode="max",
                 )
                 p2_early_stop.load_state_dict(state["early_stop"])
 
@@ -549,9 +589,11 @@ class Trainer:
             self._clear_resume_state()
 
         # ---- Phase 1: Head Only ----
+        phase1_trainable = None
         if not skip_phase1:
             freeze_backbone(self.model)
             params = count_parameters(self.model)
+            phase1_trainable = params["trainable"]
             logger.info(
                 f"Phase 1 params: {params['trainable']:,} trainable / "
                 f"{params['total']:,} total ({params['trainable_pct']:.1f}%)"
@@ -579,6 +621,11 @@ class Trainer:
             unfreeze_backbone(self.model, from_block=config.PHASE2_UNFREEZE_FROM)
 
         params = count_parameters(self.model)
+        if phase1_trainable is not None and params["trainable"] <= phase1_trainable:
+            raise RuntimeError(
+                "Phase 2 fine-tuning did not increase trainable parameters. "
+                "Check PHASE2_UNFREEZE_FROM and backbone parameter names."
+            )
         logger.info(
             f"Phase 2 params: {params['trainable']:,} trainable / "
             f"{params['total']:,} total ({params['trainable_pct']:.1f}%)"
@@ -599,6 +646,7 @@ class Trainer:
 
         # All done — save final history and clean up resume file
         history_path = os.path.join(config.LOGS_DIR, "training_history.json")
+
         def _sanitize(v):
             f = float(v)
             return 0.0 if (f != f) else f
@@ -607,7 +655,8 @@ class Trainer:
         with open(history_path, "w") as f:
             json.dump(
                 {k: [_sanitize(v) for v in vs] for k, vs in self.history.items()},
-                f, indent=2,
+                f,
+                indent=2,
             )
         logger.info(f"Training history saved to {history_path}")
 
@@ -617,7 +666,8 @@ class Trainer:
     def load_best_checkpoint(self, phase: str = "phase2"):
         """Load the best checkpoint for evaluation / inference."""
         path = os.path.join(
-            config.CHECKPOINTS_DIR, f"best_model_{phase}.pth",
+            config.CHECKPOINTS_DIR,
+            f"best_model_{phase}.pth",
         )
         if not os.path.exists(path):
             logger.warning(f"No checkpoint found at {path}")
@@ -626,5 +676,5 @@ class Trainer:
         self.model.load_state_dict(ckpt["model_state_dict"])
         logger.info(
             f"Loaded checkpoint: {path} "
-            f"(epoch {ckpt['epoch']+1}, QWK={ckpt['metrics']['kappa']:.4f})"
+            f"(epoch {ckpt['epoch'] + 1}, QWK={ckpt['metrics']['kappa']:.4f})"
         )
