@@ -7,4 +7,5 @@ from . import model
 from . import trainer
 from . import evaluate
 from . import gradcam
-# app module is imported on-demand (requires gradio)
+from . import data_manager
+# app and export modules are imported on-demand (require optional deps)
