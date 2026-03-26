@@ -24,9 +24,8 @@ desktop.ini
 # Project outputs (large checkpoints, logs, figures)
 outputs/
 
-# Dataset images (multi-GB, download via Kaggle)
-dataset/resized_train_cropped/
-dataset/resized_train/
+# Dataset (multi-GB, download via Kaggle)
+dataset/
 *.zip
 
 # Virtual environments
