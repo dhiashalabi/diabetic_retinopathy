@@ -19,12 +19,8 @@ except ImportError:
 # ---------------------------------------------------------------------------
 if IS_COLAB:
     PROJECT_ROOT = "/content/drive/MyDrive/diabetic_retinopathy"
-    # Use local SSD copy when available (10-50x faster I/O than Drive)
     _LOCAL_DATA = "/content/dataset"
-    if os.path.isdir(os.path.join(_LOCAL_DATA, "resized_train_cropped")):
-        DATA_DIR = _LOCAL_DATA
-    else:
-        DATA_DIR = os.path.join(PROJECT_ROOT, "dataset")
+    DATA_DIR = _LOCAL_DATA if os.path.isdir(_LOCAL_DATA) else os.path.join(PROJECT_ROOT, "dataset")
 else:
     PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     DATA_DIR = os.path.join(PROJECT_ROOT, "dataset")
@@ -36,7 +32,8 @@ if os.path.isdir(_images_nested):
     IMAGES_DIR = _images_nested
 else:
     IMAGES_DIR = _images_candidate
-# Outputs always on Drive so they persist after Colab session ends
+
+# Outputs always on Drive (Colab) or project root so they persist
 OUTPUTS_DIR = os.path.join(PROJECT_ROOT, "outputs")
 CHECKPOINTS_DIR = os.path.join(OUTPUTS_DIR, "checkpoints")
 FIGURES_DIR = os.path.join(OUTPUTS_DIR, "figures")
@@ -105,8 +102,9 @@ LABEL_SMOOTHING = 0.1
 DROPOUT_RATE = 0.4
 GRADIENT_CLIP_NORM = 1.0
 EARLY_STOPPING_PATIENCE = 7
-NUM_WORKERS = 2 if IS_COLAB else 0
+NUM_WORKERS = 2 if IS_COLAB else min(4, os.cpu_count() or 0)
 PIN_MEMORY = True
+
 
 # ---------------------------------------------------------------------------
 # Directory creation (call explicitly at runtime, not on import)
