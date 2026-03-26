@@ -81,17 +81,17 @@ TEST_RATIO = 0.15
 # Training — Phase 1 (head only)
 # ---------------------------------------------------------------------------
 PHASE1_EPOCHS = 10
-PHASE1_LR = 1e-3
+PHASE1_LR = 4e-3
 PHASE1_WEIGHT_DECAY = 1e-4
-PHASE1_BATCH_SIZE = 16
+PHASE1_BATCH_SIZE = 64
 
 # ---------------------------------------------------------------------------
 # Training — Phase 2 (fine-tuning)
 # ---------------------------------------------------------------------------
 PHASE2_EPOCHS = 25
-PHASE2_LR = 1e-5
+PHASE2_LR = 4e-5
 PHASE2_WEIGHT_DECAY = 1e-4
-PHASE2_BATCH_SIZE = 16
+PHASE2_BATCH_SIZE = 64
 PHASE2_WARMUP_EPOCHS = 3
 PHASE2_UNFREEZE_FROM = "block5"
 
@@ -102,7 +102,8 @@ LABEL_SMOOTHING = 0.1
 DROPOUT_RATE = 0.4
 GRADIENT_CLIP_NORM = 1.0
 EARLY_STOPPING_PATIENCE = 7
-NUM_WORKERS = 2 if IS_COLAB else min(4, os.cpu_count() or 0)
+NUM_WORKERS = 2 if IS_COLAB else min(16, os.cpu_count() or 4)
+PREFETCH_FACTOR = 4
 PIN_MEMORY = True
 
 

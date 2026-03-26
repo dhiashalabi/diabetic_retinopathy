@@ -187,8 +187,8 @@ class Trainer:
         running_loss = 0.0
         correct = 0
         total = 0
-        all_preds = []
-        all_labels = []
+        all_preds: list[torch.Tensor] = []
+        all_labels: list[torch.Tensor] = []
 
         pbar = tqdm(loader, desc="  Train", leave=False)
         for images, labels in pbar:
@@ -214,8 +214,8 @@ class Trainer:
             preds = outputs.argmax(dim=1)
             correct += (preds == labels).sum().item()
             total += batch_size
-            all_preds.extend(preds.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
+            all_preds.append(preds.detach())
+            all_labels.append(labels.detach())
 
             pbar.set_postfix(
                 loss=f"{loss.item():.4f}",
@@ -227,9 +227,9 @@ class Trainer:
 
         epoch_loss = running_loss / total
         epoch_acc = correct / total
-        epoch_kappa = cohen_kappa_score(
-            all_labels, all_preds, weights="quadratic",
-        )
+        y_pred = torch.cat(all_preds).cpu().numpy()
+        y_true = torch.cat(all_labels).cpu().numpy()
+        epoch_kappa = cohen_kappa_score(y_true, y_pred, weights="quadratic")
 
         return {"loss": epoch_loss, "acc": epoch_acc, "kappa": epoch_kappa}
 
@@ -240,8 +240,8 @@ class Trainer:
         running_loss = 0.0
         correct = 0
         total = 0
-        all_preds = []
-        all_labels = []
+        all_preds: list[torch.Tensor] = []
+        all_labels: list[torch.Tensor] = []
 
         pbar = tqdm(loader, desc="  Valid", leave=False)
         for images, labels in pbar:
@@ -257,17 +257,17 @@ class Trainer:
             preds = outputs.argmax(dim=1)
             correct += (preds == labels).sum().item()
             total += batch_size
-            all_preds.extend(preds.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
+            all_preds.append(preds.detach())
+            all_labels.append(labels.detach())
 
         if total == 0:
             return {"loss": 0.0, "acc": 0.0, "kappa": 0.0}
 
         epoch_loss = running_loss / total
         epoch_acc = correct / total
-        epoch_kappa = cohen_kappa_score(
-            all_labels, all_preds, weights="quadratic",
-        )
+        y_pred = torch.cat(all_preds).cpu().numpy()
+        y_true = torch.cat(all_labels).cpu().numpy()
+        epoch_kappa = cohen_kappa_score(y_true, y_pred, weights="quadratic")
 
         return {"loss": epoch_loss, "acc": epoch_acc, "kappa": epoch_kappa}
 
@@ -573,6 +573,8 @@ class Trainer:
             logger.info("Phase 1 already completed — skipping.")
 
         # ---- Phase 2: Fine-Tune ----
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
         if p2_optimizer is None:
             unfreeze_backbone(self.model, from_block=config.PHASE2_UNFREEZE_FROM)
 
