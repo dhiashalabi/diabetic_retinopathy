@@ -100,9 +100,25 @@ LABEL_SMOOTHING = 0.1
 DROPOUT_RATE = 0.4
 GRADIENT_CLIP_NORM = 1.0
 EARLY_STOPPING_PATIENCE = 10
-NUM_WORKERS = 2 if IS_COLAB else min(16, os.cpu_count() or 4)
+
+# DataLoader worker defaults differ by platform. On Windows, too many workers can
+# reduce throughput because process spawning is relatively expensive.
+if IS_COLAB:
+    NUM_WORKERS = 2
+else:
+    _cpu_count = os.cpu_count() or 4
+    NUM_WORKERS = min(8, max(2, _cpu_count // 2)) if os.name == "nt" else min(16, _cpu_count)
+
 PREFETCH_FACTOR = 4
 PIN_MEMORY = True
+
+# ---------------------------------------------------------------------------
+# Preprocessing cache
+# ---------------------------------------------------------------------------
+PREPROCESSING_CACHE_VERSION = "v1"
+CACHE_IMAGE_FORMAT = "jpg"  # supported: jpg, jpeg, png, webp
+CACHE_IMAGE_QUALITY = 95
+CACHE_PNG_COMPRESSION = 3
 
 
 # ---------------------------------------------------------------------------
