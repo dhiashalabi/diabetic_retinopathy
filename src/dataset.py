@@ -9,6 +9,7 @@ Balancing strategy (multi-pronged):
   4. Heavy augmentation on minority classes (via augmentations.py)
 """
 
+import json
 import os
 
 import cv2
@@ -24,7 +25,7 @@ from .preprocessing import preprocess_image
 from .utils import get_logger
 
 _logger = get_logger(__name__)
-_EXTENSIONS = (".jpeg", ".jpg", ".png", ".JPEG", ".JPG")
+_EXTENSIONS = (".jpeg", ".jpg", ".png", ".webp", ".JPEG", ".JPG", ".PNG", ".WEBP")
 
 
 # -----------------------------------------------------------------------
@@ -243,6 +244,7 @@ def create_dataloaders(
     num_workers: int = config.NUM_WORKERS,
     preprocessing: bool = True,
     use_sampler: bool = True,
+    sampler_seed: int | None = config.SEED,
 ) -> dict[str, DataLoader]:
     """
     Build DataLoaders with balanced sampling for training.
@@ -283,10 +285,13 @@ def create_dataloaders(
             config.NUM_CLASSES * min_class_count * 2,
             len(train_ds),
         )
+        sampler_generator = torch.Generator()
+        sampler_generator.manual_seed(config.SEED if sampler_seed is None else sampler_seed)
         sampler = WeightedRandomSampler(
             weights=torch.from_numpy(sample_weights).double(),
             num_samples=balanced_num_samples,
             replacement=True,
+            generator=sampler_generator,
         )
         shuffle_train = False  # mutually exclusive with sampler
 
@@ -338,20 +343,56 @@ def preprocess_images_to_cache(
     cache_dir: str | None = None,
     img_size: int = config.IMG_SIZE,
     overwrite: bool = False,
+    cache_image_format: str = config.CACHE_IMAGE_FORMAT,
+    cache_image_quality: int = config.CACHE_IMAGE_QUALITY,
 ) -> str:
     """
-    Preprocess images once and store as JPEG cache for fast training reads.
+    Preprocess images once and store to cache for fast training reads.
     """
+    cache_image_format = cache_image_format.lower().lstrip(".")
+    if cache_image_format not in {"jpg", "jpeg", "png", "webp"}:
+        raise ValueError("Unsupported cache_image_format. Use one of: jpg, jpeg, png, webp")
+
     cache_dir = cache_dir or os.path.join(config.DATA_DIR, f"preprocessed_{img_size}")
     os.makedirs(cache_dir, exist_ok=True)
 
     unique_ids = pd.unique(df["image"])
+    cache_ext = f".{cache_image_format}"
+    meta_path = os.path.join(cache_dir, "cache_meta.json")
+
+    source_images_dir_abs = os.path.abspath(source_images_dir)
+    current_meta = {
+        "version": config.PREPROCESSING_CACHE_VERSION,
+        "img_size": int(img_size),
+        "source_images_dir": source_images_dir_abs,
+        "cache_image_format": cache_image_format,
+        "cache_image_quality": int(cache_image_quality),
+        "num_unique_images": int(len(unique_ids)),
+    }
+
+    if os.path.isfile(meta_path):
+        try:
+            with open(meta_path, encoding="utf-8") as f:
+                existing_meta = json.load(f)
+            if existing_meta != current_meta and not overwrite:
+                _logger.info(
+                    "Cache metadata mismatch detected in %s; forcing refresh.",
+                    cache_dir,
+                )
+                overwrite = True
+        except (OSError, json.JSONDecodeError):
+            _logger.warning(
+                "Could not read cache metadata at %s; forcing refresh.",
+                meta_path,
+            )
+            overwrite = True
+
     written = 0
     skipped = 0
     missing = 0
 
     for img_id in unique_ids:
-        out_path = os.path.join(cache_dir, f"{img_id}.jpg")
+        out_path = os.path.join(cache_dir, f"{img_id}{cache_ext}")
         if os.path.isfile(out_path) and not overwrite:
             skipped += 1
             continue
@@ -373,8 +414,37 @@ def preprocess_images_to_cache(
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img = preprocess_image(img, img_size=img_size)
         img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-        cv2.imwrite(out_path, img, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+
+        if cache_image_format in {"jpg", "jpeg"}:
+            write_ok = cv2.imwrite(
+                out_path,
+                img,
+                [int(cv2.IMWRITE_JPEG_QUALITY), int(cache_image_quality)],
+            )
+        elif cache_image_format == "png":
+            write_ok = cv2.imwrite(
+                out_path,
+                img,
+                [int(cv2.IMWRITE_PNG_COMPRESSION), int(config.CACHE_PNG_COMPRESSION)],
+            )
+        else:  # webp
+            write_ok = cv2.imwrite(
+                out_path,
+                img,
+                [int(cv2.IMWRITE_WEBP_QUALITY), int(cache_image_quality)],
+            )
+
+        if not write_ok:
+            _logger.warning("Failed writing cached image: %s", out_path)
+            missing += 1
+            continue
         written += 1
+
+    try:
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(current_meta, f, indent=2, sort_keys=True)
+    except OSError:
+        _logger.warning("Failed to write cache metadata at %s", meta_path)
 
     _logger.info(
         "Preprocessing cache ready at %s | written=%d skipped=%d missing=%d",
