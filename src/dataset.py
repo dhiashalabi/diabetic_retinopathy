@@ -166,12 +166,14 @@ class DRDataset(Dataset):
         transform=None,
         preprocessing: bool = True,
         img_size: int = config.IMG_SIZE,
+        fail_on_missing: bool = config.CACHE_FAIL_ON_MISSING,
     ):
         self.df = df.reset_index(drop=True)
         self.images_dir = images_dir
         self.transform = transform
         self.preprocessing = preprocessing
         self.img_size = img_size
+        self.fail_on_missing = fail_on_missing
 
         self.image_ids = self.df["image"].values
         self.labels = self.df["level"].values.astype(np.int64)
@@ -209,11 +211,22 @@ class DRDataset(Dataset):
         try:
             img_path = self._find_image_path(img_id)
             img = cv2.imread(img_path)
-        except FileNotFoundError:
+        except FileNotFoundError as exc:
+            if self.fail_on_missing:
+                raise FileNotFoundError(
+                    f"Missing image '{img_id}' in {self.images_dir}. "
+                    "Run cache preprocessing/audit before training."
+                ) from exc
             img = None
 
         if img is None:
-            _logger.warning(f"Missing/unreadable image: '{img_id}' — using black placeholder")
+            msg = (
+                f"Missing/unreadable image: '{img_id}' in {self.images_dir}. "
+                "Run cache preprocessing/audit before training."
+            )
+            if self.fail_on_missing:
+                raise RuntimeError(msg)
+            _logger.warning("%s Using black placeholder due to fail_on_missing=False.", msg)
             img = np.zeros((self.img_size, self.img_size, 3), dtype=np.uint8)
         else:
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -245,6 +258,7 @@ def create_dataloaders(
     preprocessing: bool = True,
     use_sampler: bool = True,
     sampler_seed: int | None = config.SEED,
+    fail_on_missing: bool = config.CACHE_FAIL_ON_MISSING,
 ) -> dict[str, DataLoader]:
     """
     Build DataLoaders with balanced sampling for training.
@@ -266,12 +280,14 @@ def create_dataloaders(
         images_dir,
         transform=train_transform,
         preprocessing=preprocessing,
+        fail_on_missing=fail_on_missing,
     )
     valid_ds = DRDataset(
         valid_df,
         images_dir,
         transform=valid_transform,
         preprocessing=preprocessing,
+        fail_on_missing=fail_on_missing,
     )
 
     # --- Balanced sampling ---
@@ -326,6 +342,7 @@ def create_dataloaders(
             images_dir,
             transform=valid_transform,
             preprocessing=preprocessing,
+            fail_on_missing=fail_on_missing,
         )
         loaders["test"] = DataLoader(
             test_ds,
@@ -345,6 +362,7 @@ def preprocess_images_to_cache(
     overwrite: bool = False,
     cache_image_format: str = config.CACHE_IMAGE_FORMAT,
     cache_image_quality: int = config.CACHE_IMAGE_QUALITY,
+    fail_on_missing: bool = config.CACHE_FAIL_ON_MISSING,
 ) -> str:
     """
     Preprocess images once and store to cache for fast training reads.
@@ -405,11 +423,13 @@ def preprocess_images_to_cache(
                 break
         if src_path is None:
             missing += 1
+            _logger.warning("Source image missing for '%s' while building cache", img_id)
             continue
 
         img = cv2.imread(src_path)
         if img is None:
             missing += 1
+            _logger.warning("Unreadable source image for '%s' while building cache", img_id)
             continue
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img = preprocess_image(img, img_size=img_size)
@@ -453,4 +473,49 @@ def preprocess_images_to_cache(
         skipped,
         missing,
     )
+
+    if fail_on_missing and missing > 0:
+        raise RuntimeError(
+            f"Cache build failed integrity check: missing/unreadable count={missing}. "
+            "Fix data issues and rerun preprocessing."
+        )
+
     return cache_dir
+
+
+def validate_cache_for_dataframe(
+    df: pd.DataFrame,
+    cache_dir: str,
+    cache_image_format: str = config.CACHE_IMAGE_FORMAT,
+) -> dict[str, int]:
+    """Validate that every expected image ID exists in cache with the target extension."""
+    cache_image_format = cache_image_format.lower().lstrip(".")
+    expected_ids = pd.unique(df["image"])
+    cache_ext = f".{cache_image_format}"
+
+    missing_ids: list[str] = []
+    for img_id in expected_ids:
+        out_path = os.path.join(cache_dir, f"{img_id}{cache_ext}")
+        if not os.path.isfile(out_path):
+            missing_ids.append(img_id)
+
+    summary = {
+        "expected": int(len(expected_ids)),
+        "missing": int(len(missing_ids)),
+        "present": int(len(expected_ids) - len(missing_ids)),
+    }
+    if missing_ids:
+        sample = ", ".join(missing_ids[:5])
+        raise RuntimeError(
+            f"Cache validation failed in {cache_dir}: {summary['missing']} missing files. "
+            f"Examples: {sample}"
+        )
+
+    _logger.info(
+        "Cache validation passed for %s | expected=%d present=%d missing=%d",
+        cache_dir,
+        summary["expected"],
+        summary["present"],
+        summary["missing"],
+    )
+    return summary

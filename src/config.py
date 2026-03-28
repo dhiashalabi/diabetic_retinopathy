@@ -124,10 +124,11 @@ PIN_MEMORY = True
 # ---------------------------------------------------------------------------
 # Preprocessing cache
 # ---------------------------------------------------------------------------
-PREPROCESSING_CACHE_VERSION = "v1"
-CACHE_IMAGE_FORMAT = "jpg"  # supported: jpg, jpeg, png, webp
+PREPROCESSING_CACHE_VERSION = "v2"
+CACHE_IMAGE_FORMAT = "png"  # supported: jpg, jpeg, png, webp
 CACHE_IMAGE_QUALITY = 95
 CACHE_PNG_COMPRESSION = 3
+CACHE_FAIL_ON_MISSING = True
 
 
 # ---------------------------------------------------------------------------
