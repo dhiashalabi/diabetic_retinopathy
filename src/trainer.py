@@ -82,7 +82,7 @@ class CosineWarmupScheduler:
             progress = (epoch - self.warmup_epochs) / max(1, self.total_epochs - self.warmup_epochs)
             factor = 0.5 * (1.0 + np.cos(np.pi * progress))
 
-        for pg, base_lr in zip(self.optimizer.param_groups, self.base_lrs):
+        for pg, base_lr in zip(self.optimizer.param_groups, self.base_lrs, strict=True):
             pg["lr"] = max(base_lr * factor, self.min_lr)
 
     def get_last_lr(self) -> list[float]:
@@ -299,89 +299,6 @@ class Trainer:
         torch.save(ckpt, path)
         logger.info(f"Checkpoint saved: {path} (QWK={metrics['kappa']:.4f})")
 
-    def _save_resume_state(
-        self,
-        *,
-        phase: str,
-        next_epoch: int,
-        epochs: int,
-        lr: float,
-        weight_decay: float,
-        warmup_epochs: int,
-        optimizer: torch.optim.Optimizer,
-        early_stop: EarlyStopping,
-        phase_done: bool,
-    ) -> None:
-        """Save full training state after each epoch for crash recovery."""
-        payload = {
-            "model_state_dict": self.model.state_dict(),
-            "scaler_state_dict": self.scaler.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "history": {k: list(v) for k, v in self.history.items()},
-            "best_kappa": self.best_kappa,
-            "phase": phase,
-            "next_epoch": next_epoch,
-            "epochs": epochs,
-            "lr": lr,
-            "weight_decay": weight_decay,
-            "warmup_epochs": warmup_epochs,
-            "early_stop": early_stop.state_dict(),
-            "phase_done": phase_done,
-        }
-        path = config.RESUME_STATE_PATH
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        torch.save(payload, path)
-
-    @staticmethod
-    def has_resume_state() -> bool:
-        return os.path.isfile(config.RESUME_STATE_PATH)
-
-    def _load_resume_state(self) -> dict:
-        path = config.RESUME_STATE_PATH
-        state = torch.load(path, map_location=self.device, weights_only=False)
-        self.model.load_state_dict(state["model_state_dict"])
-        self.scaler.load_state_dict(state["scaler_state_dict"])
-        self.history = state["history"]
-        self.best_kappa = state["best_kappa"]
-        logger.info(
-            f"Restored resume state: phase={state['phase']}, "
-            f"next_epoch={state['next_epoch']}, best_kappa={state['best_kappa']:.4f}"
-        )
-        return state
-
-    def _clear_resume_state(self) -> None:
-        path = config.RESUME_STATE_PATH
-        if os.path.isfile(path):
-            os.remove(path)
-            logger.info("Training complete — resume state cleared.")
-
-    def resume_from_checkpoint(
-        self,
-        path: str,
-        optimizer=None,
-        scaler=None,
-    ) -> int:
-        """
-        Restore model, optimizer, and scaler from a checkpoint.
-
-        Returns the epoch number to resume from (epoch + 1).
-        """
-        if not os.path.exists(path):
-            logger.warning(f"No checkpoint found at {path}")
-            return 0
-        ckpt = torch.load(path, map_location=self.device, weights_only=False)
-        self.model.load_state_dict(ckpt["model_state_dict"])
-        if optimizer is not None and "optimizer_state_dict" in ckpt:
-            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-        if scaler is not None and "scaler_state_dict" in ckpt:
-            scaler.load_state_dict(ckpt["scaler_state_dict"])
-        self.best_kappa = ckpt["metrics"].get("kappa", -1.0)
-        resume_epoch = ckpt["epoch"] + 1
-        logger.info(
-            f"Resumed from {path} (epoch {resume_epoch}, QWK={ckpt['metrics']['kappa']:.4f})"
-        )
-        return resume_epoch
-
     def fit_phase(
         self,
         phase: str,
@@ -391,54 +308,37 @@ class Trainer:
         lr: float,
         weight_decay: float,
         warmup_epochs: int = 0,
-        *,
-        _start_epoch: int = 0,
-        _optimizer: torch.optim.Optimizer | None = None,
-        _early_stop: EarlyStopping | None = None,
     ) -> bool:
         """
         Run one training phase (head-only or fine-tuning).
 
         Returns True if the phase completed normally, False if early-stopped.
-
-        Internal resume parameters (prefixed with _) are passed by fit() when
-        restoring from a crash — callers should never set them directly.
         """
         criterion = self._build_criterion()
 
-        if _optimizer is not None:
-            optimizer = _optimizer
-        else:
-            optimizer = torch.optim.AdamW(
-                filter(lambda p: p.requires_grad, self.model.parameters()),
-                lr=lr,
-                weight_decay=weight_decay,
-            )
+        optimizer = torch.optim.AdamW(
+            filter(lambda p: p.requires_grad, self.model.parameters()),
+            lr=lr,
+            weight_decay=weight_decay,
+        )
 
         scheduler = CosineWarmupScheduler(
             optimizer,
             warmup_epochs=warmup_epochs,
             total_epochs=epochs,
         )
-        early_stop = _early_stop or EarlyStopping(
+        early_stop = EarlyStopping(
             patience=config.EARLY_STOPPING_PATIENCE,
             mode="max",
         )
 
-        remaining = epochs - _start_epoch
         logger.info(f"\n{'=' * 60}")
-        if _start_epoch > 0:
-            logger.info(
-                f"Phase: {phase.upper()} | Resuming from epoch {_start_epoch + 1}/{epochs} "
-                f"({remaining} remaining) | LR: {lr}"
-            )
-        else:
-            logger.info(f"Phase: {phase.upper()} | Epochs: {epochs} | LR: {lr}")
+        logger.info(f"Phase: {phase.upper()} | Epochs: {epochs} | LR: {lr}")
         logger.info(f"{'=' * 60}")
 
         early_stopped = False
 
-        for epoch in range(_start_epoch, epochs):
+        for epoch in range(epochs):
             t0 = time.time()
 
             scheduler.step(epoch)
@@ -483,31 +383,7 @@ class Trainer:
                     f"Early stopping at epoch {epoch + 1} (best QWK: {early_stop.best_score:.4f})"
                 )
                 early_stopped = True
-                self._save_resume_state(
-                    phase=phase,
-                    next_epoch=epoch + 1,
-                    epochs=epochs,
-                    lr=lr,
-                    weight_decay=weight_decay,
-                    warmup_epochs=warmup_epochs,
-                    optimizer=optimizer,
-                    early_stop=early_stop,
-                    phase_done=True,
-                )
                 break
-
-            # Persist resume state after every successful epoch
-            self._save_resume_state(
-                phase=phase,
-                next_epoch=epoch + 1,
-                epochs=epochs,
-                lr=lr,
-                weight_decay=weight_decay,
-                warmup_epochs=warmup_epochs,
-                optimizer=optimizer,
-                early_stop=early_stop,
-                phase_done=(epoch + 1 == epochs),
-            )
 
         return not early_stopped
 
@@ -515,110 +391,40 @@ class Trainer:
         self,
         train_loader: DataLoader,
         valid_loader: DataLoader,
-        *,
-        resume: bool = True,
     ) -> dict:
         """
-        Full two-phase training with automatic crash recovery.
-
-        When ``resume=True`` (default), the method checks for a saved resume
-        state on disk.  If one exists it restores model weights, optimizer,
-        scaler, early-stopping state, and training history, then picks up
-        exactly where training left off — even mid-phase.
-
-        Set ``resume=False`` to force a fresh start (the resume file is
-        ignored and deleted).
+        Full three-phase training pipeline.
 
         Phase 1 — head-only (high LR, no warmup)
-        Phase 2 — fine-tune from block5 (low LR, warmup)
+        Phase 2 — partial unfreeze features[-2:] (low LR, warmup)
+        Phase 3 — full unfreeze (very low LR, warmup)
         """
         from .model import count_parameters, freeze_backbone, unfreeze_backbone
 
-        skip_phase1 = False
-        p1_start_epoch = 0
-        p2_start_epoch = 0
-        p1_optimizer = None
-        p2_optimizer = None
-        p1_early_stop = None
-        p2_early_stop = None
-
-        if resume and self.has_resume_state():
-            state = self._load_resume_state()
-            phase = state["phase"]
-
-            if phase == "phase1" and not state["phase_done"]:
-                p1_start_epoch = state["next_epoch"]
-                freeze_backbone(self.model)
-                p1_optimizer = torch.optim.AdamW(
-                    filter(lambda p: p.requires_grad, self.model.parameters()),
-                    lr=state["lr"],
-                    weight_decay=state["weight_decay"],
-                )
-                p1_optimizer.load_state_dict(state["optimizer_state_dict"])
-                p1_early_stop = EarlyStopping(
-                    patience=config.EARLY_STOPPING_PATIENCE,
-                    mode="max",
-                )
-                p1_early_stop.load_state_dict(state["early_stop"])
-
-            elif phase == "phase1" and state["phase_done"]:
-                skip_phase1 = True
-
-            elif phase == "phase2" and not state["phase_done"]:
-                skip_phase1 = True
-                p2_start_epoch = state["next_epoch"]
-                unfreeze_backbone(self.model, from_block=config.PHASE2_UNFREEZE_FROM)
-                p2_optimizer = torch.optim.AdamW(
-                    filter(lambda p: p.requires_grad, self.model.parameters()),
-                    lr=state["lr"],
-                    weight_decay=state["weight_decay"],
-                )
-                p2_optimizer.load_state_dict(state["optimizer_state_dict"])
-                p2_early_stop = EarlyStopping(
-                    patience=config.EARLY_STOPPING_PATIENCE,
-                    mode="max",
-                )
-                p2_early_stop.load_state_dict(state["early_stop"])
-
-            elif phase == "phase2" and state["phase_done"]:
-                logger.info("Resume state indicates training already completed.")
-                self._clear_resume_state()
-                return self.history
-
-        elif not resume:
-            self._clear_resume_state()
-
         # ---- Phase 1: Head Only ----
         phase1_trainable = None
-        if not skip_phase1:
-            freeze_backbone(self.model)
-            params = count_parameters(self.model)
-            phase1_trainable = params["trainable"]
-            logger.info(
-                f"Phase 1 params: {params['trainable']:,} trainable / "
-                f"{params['total']:,} total ({params['trainable_pct']:.1f}%)"
-            )
+        freeze_backbone(self.model)
+        params = count_parameters(self.model)
+        phase1_trainable = params["trainable"]
+        logger.info(
+            f"Phase 1 params: {params['trainable']:,} trainable / "
+            f"{params['total']:,} total ({params['trainable_pct']:.1f}%)"
+        )
 
-            self.fit_phase(
-                phase="phase1",
-                train_loader=train_loader,
-                valid_loader=valid_loader,
-                epochs=config.PHASE1_EPOCHS,
-                lr=config.PHASE1_LR,
-                weight_decay=config.PHASE1_WEIGHT_DECAY,
-                warmup_epochs=0,
-                _start_epoch=p1_start_epoch,
-                _optimizer=p1_optimizer,
-                _early_stop=p1_early_stop,
-            )
-        else:
-            logger.info("Phase 1 already completed — skipping.")
+        self.fit_phase(
+            phase="phase1",
+            train_loader=train_loader,
+            valid_loader=valid_loader,
+            epochs=config.PHASE1_EPOCHS,
+            lr=config.PHASE1_LR,
+            weight_decay=config.PHASE1_WEIGHT_DECAY,
+            warmup_epochs=0,
+        )
 
-        # ---- Phase 2: Fine-Tune ----
+        # ---- Phase 2: Partial Unfreeze (features[-2:]) ----
         if self.device.type == "cuda":
             torch.cuda.empty_cache()
-        if p2_optimizer is None:
-            unfreeze_backbone(self.model, from_block=config.PHASE2_UNFREEZE_FROM)
+        unfreeze_backbone(self.model, from_block=config.PHASE2_UNFREEZE_FROM)
 
         params = count_parameters(self.model)
         if phase1_trainable is not None and params["trainable"] <= phase1_trainable:
@@ -639,12 +445,30 @@ class Trainer:
             lr=config.PHASE2_LR,
             weight_decay=config.PHASE2_WEIGHT_DECAY,
             warmup_epochs=config.PHASE2_WARMUP_EPOCHS,
-            _start_epoch=p2_start_epoch,
-            _optimizer=p2_optimizer,
-            _early_stop=p2_early_stop,
         )
 
-        # All done — save final history and clean up resume file
+        # ---- Phase 3: Full Unfreeze ----
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+        unfreeze_backbone(self.model, from_block=None)  # Full unfreeze all parameters
+
+        params = count_parameters(self.model)
+        logger.info(
+            f"Phase 3 params: {params['trainable']:,} trainable / "
+            f"{params['total']:,} total ({params['trainable_pct']:.1f}%)"
+        )
+
+        self.fit_phase(
+            phase="phase3",
+            train_loader=train_loader,
+            valid_loader=valid_loader,
+            epochs=config.PHASE3_EPOCHS,
+            lr=config.PHASE3_LR,
+            weight_decay=config.PHASE3_WEIGHT_DECAY,
+            warmup_epochs=config.PHASE3_WARMUP_EPOCHS,
+        )
+
+        # All done — save final history
         history_path = os.path.join(config.LOGS_DIR, "training_history.json")
 
         def _sanitize(v):
@@ -660,10 +484,9 @@ class Trainer:
             )
         logger.info(f"Training history saved to {history_path}")
 
-        self._clear_resume_state()
         return self.history
 
-    def load_best_checkpoint(self, phase: str = "phase2"):
+    def load_best_checkpoint(self, phase: str = "phase3"):
         """Load the best checkpoint for evaluation / inference."""
         path = os.path.join(
             config.CHECKPOINTS_DIR,

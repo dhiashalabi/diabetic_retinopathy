@@ -194,7 +194,7 @@ def test_onnx_inference(
     result = {
         "predicted_class": config.CLASS_NAMES[pred_idx],
         "confidence": float(probs[pred_idx]),
-        "probabilities": {name: float(p) for name, p in zip(config.CLASS_NAMES, probs)},
+        "probabilities": {name: float(p) for name, p in zip(config.CLASS_NAMES, probs, strict=True)},
     }
 
     logger.info(f"Prediction: {result['predicted_class']} ({result['confidence']:.1%})")

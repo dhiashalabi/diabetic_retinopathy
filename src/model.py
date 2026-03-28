@@ -1,10 +1,10 @@
 """
-EfficientNet-B4 model builder with freeze / unfreeze utilities.
+EfficientNet-B3 model builder with freeze / unfreeze utilities.
 
 Architecture choices targeting high accuracy:
-- timm pretrained weights (ImageNet-1k, top-1 ~83%)
+- timm pretrained weights (ImageNet-1k, top-1  ~82%)
 - Custom head: pooling -> BN -> dropout -> FC -> BN -> dropout -> FC
-- Two-phase training: head-only then backbone fine-tune
+- Three-phase training: head-only, partial unfreeze, full unfreeze
 - BatchNorm freezing during fine-tuning to preserve ImageNet statistics
 """
 
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 class DRModel(nn.Module):
     """
-    EfficientNet-B4 with a custom two-layer classification head.
+    EfficientNet-B3 with a custom two-layer classification head.
 
     The deeper head (pool -> BN -> drop -> FC -> ReLU -> BN -> drop -> FC)
     gives the model more capacity to learn DR-specific representations
@@ -41,7 +41,7 @@ class DRModel(nn.Module):
             pretrained=pretrained,
             num_classes=0,
         )
-        in_features = self.backbone.num_features  # 1792 for efficientnet_b4
+        in_features = self.backbone.num_features  # 1536 for efficientnet_b3
 
         self.head = nn.Sequential(
             nn.BatchNorm1d(in_features),
@@ -86,29 +86,79 @@ def freeze_backbone(model: DRModel) -> None:
         param.requires_grad = False
 
 
-def unfreeze_backbone(model: DRModel, from_block: str = config.PHASE2_UNFREEZE_FROM) -> None:
+def unfreeze_backbone(model: DRModel, from_block: str | None = None) -> None:
     """
-    Unfreeze backbone from ``from_block`` onwards (e.g. "block5").
+    Unfreeze backbone from ``from_block`` onwards.
 
-    Layers before the specified block remain frozen.  All BatchNorm
-    layers in the backbone are kept frozen regardless — this is
-    critical for transfer-learning stability when batch sizes are
-    small relative to the pretrained regime.
+    If from_block is None, unfreezes all backbone parameters (full unfreeze).
+    Supports multiple formats:
+    - None — full unfreeze of all backbone layers
+    - "block5" — traditional EfficientNet block name (blocks.5 in timm)
+    - "features[-2:]" — unfreeze last 2 feature blocks (e.g., for 8-block model, unfreeze blocks 6+7)
+    - Direct layer name from named_parameters()
+
+    All BatchNorm layers in the backbone are kept frozen regardless — this is
+    critical for transfer-learning stability when batch sizes are small
+    relative to the pretrained regime.
     """
+    if from_block is None:
+        # Full unfreeze: unfreeze all backbone parameters
+        for param in model.backbone.parameters():
+            param.requires_grad = True
+        logger.info("Full backbone unfreeze: all backbone parameters now trainable.")
+        freeze_batchnorm(model)
+        return
+
     found = False
-    normalized = str(from_block).strip().lower().replace("_", "")
     candidate_prefixes: list[str] = []
 
-    # Support common EfficientNet user inputs like "block5" by mapping to timm names.
-    if normalized.startswith("block") and normalized[5:].isdigit():
-        idx = int(normalized[5:])
-        candidate_prefixes.append(f"blocks.{idx}")
-    candidate_prefixes.extend(
-        [
-            from_block,
-            from_block.replace("_", "."),
-        ]
-    )
+    # Parse "features[-2:]" syntax to unfreeze last N blocks
+    if isinstance(from_block, str) and "features[" in from_block and "]" in from_block:
+        try:
+            # Extract slice notation (e.g., "-2:" from "features[-2:]")
+            import re
+
+            match = re.search(r"features\[(.*?)\]", from_block)
+            if match:
+                slice_str = match.group(1)
+                # Get all feature blocks and apply slice
+                all_params = list(model.backbone.named_parameters())
+                # Find feature block indices
+                feature_indices = set()
+                for name, _ in all_params:
+                    feat_match = re.search(r"features\.(\d+)", name)
+                    if feat_match:
+                        feature_indices.add(int(feat_match.group(1)))
+
+                if feature_indices:
+                    # Convert to sorted list and apply slice
+                    sorted_indices = sorted(feature_indices)
+                    # Evaluate slice (e.g., "-2:" on [0,1,2,3,4,5,6,7] gives [6,7])
+                    slice_obj = eval(f"slice({slice_str})")
+                    unfrozen_indices = sorted_indices[slice_obj]
+
+                    # Build candidate prefixes for unfrozen blocks
+                    for idx in unfrozen_indices:
+                        candidate_prefixes.append(f"features.{idx}")
+
+                    logger.info(f"Parsed '{from_block}' → unfrozen blocks: {unfrozen_indices}")
+        except Exception as e:
+            logger.warning(
+                f"Failed to parse '{from_block}': {e}. Falling back to literal string match."
+            )
+            candidate_prefixes.append(from_block)
+    else:
+        # Traditional block name parsing (e.g., "block5" → "blocks.5")
+        normalized = str(from_block).strip().lower().replace("_", "")
+        if normalized.startswith("block") and normalized[5:].isdigit():
+            idx = int(normalized[5:])
+            candidate_prefixes.append(f"blocks.{idx}")
+        candidate_prefixes.extend(
+            [
+                from_block,
+                from_block.replace("_", "."),
+            ]
+        )
 
     for name, param in model.backbone.named_parameters():
         if not found and any(
@@ -125,7 +175,7 @@ def unfreeze_backbone(model: DRModel, from_block: str = config.PHASE2_UNFREEZE_F
     else:
         logger.info(
             f"Backbone unfreezing started from '{from_block}' "
-            f"(matched prefixes: {candidate_prefixes})."
+            f"(unfrozen prefixes: {candidate_prefixes})."
         )
 
     freeze_batchnorm(model)
