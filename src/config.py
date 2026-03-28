@@ -63,10 +63,10 @@ SEED = 42
 # ---------------------------------------------------------------------------
 # Image & Model
 # ---------------------------------------------------------------------------
-IMG_SIZE = 380  # EfficientNet-B4 native resolution
+IMG_SIZE = 300  # EfficientNet-B3 native resolution
 IMG_MEAN = [0.485, 0.456, 0.406]  # ImageNet stats
 IMG_STD = [0.229, 0.224, 0.225]
-MODEL_NAME = "efficientnet_b4"
+MODEL_NAME = "efficientnet_b3"
 
 # ---------------------------------------------------------------------------
 # Data split
@@ -76,22 +76,31 @@ VALID_RATIO = 0.15
 TEST_RATIO = 0.15
 
 # ---------------------------------------------------------------------------
-# Training — Phase 1 (head only)
+# Training — Phase 1 (head only, frozen backbone)
 # ---------------------------------------------------------------------------
-PHASE1_EPOCHS = 10
-PHASE1_LR = 4e-3
+PHASE1_EPOCHS = 5
+PHASE1_LR = 1e-3
 PHASE1_WEIGHT_DECAY = 1e-4
 PHASE1_BATCH_SIZE = 64
 
 # ---------------------------------------------------------------------------
-# Training — Phase 2 (fine-tuning)
+# Training — Phase 2 (partial unfreeze: features[-2:])
 # ---------------------------------------------------------------------------
-PHASE2_EPOCHS = 25
-PHASE2_LR = 4e-5
+PHASE2_EPOCHS = 10
+PHASE2_LR = 2e-5
 PHASE2_WEIGHT_DECAY = 1e-4
 PHASE2_BATCH_SIZE = 64
-PHASE2_WARMUP_EPOCHS = 3
-PHASE2_UNFREEZE_FROM = "block5"
+PHASE2_WARMUP_EPOCHS = 2
+PHASE2_UNFREEZE_FROM = "features[-2:]"
+
+# ---------------------------------------------------------------------------
+# Training — Phase 3 (full unfreeze)
+# ---------------------------------------------------------------------------
+PHASE3_EPOCHS = 20
+PHASE3_LR = 1e-5
+PHASE3_WEIGHT_DECAY = 1e-4
+PHASE3_BATCH_SIZE = 64
+PHASE3_WARMUP_EPOCHS = 2
 
 # ---------------------------------------------------------------------------
 # Shared training settings

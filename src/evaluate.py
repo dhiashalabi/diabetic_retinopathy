@@ -426,7 +426,7 @@ def predict_single_image(
         "predicted_class": pred_class,
         "severity": severity_desc.get(pred_class, pred_class),
         "confidence": confidence,
-        "probabilities": {c: float(p) for c, p in zip(class_names, probs)},
+        "probabilities": {c: float(p) for c, p in zip(class_names, probs, strict=True)},
     }
 
     if show:
