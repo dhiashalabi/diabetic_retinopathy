@@ -416,7 +416,7 @@ class Trainer:
         """
         self.best_kappa = -1.0
 
-        criterion = self._build_criterion()
+        criterion = self._build_criterion().to(self.device)
 
         optimizer = torch.optim.AdamW(
             filter(lambda p: p.requires_grad, self.model.parameters()),
