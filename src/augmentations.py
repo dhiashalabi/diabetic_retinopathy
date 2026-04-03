@@ -9,9 +9,9 @@ Provides three training pipelines:
 Also includes Mixup utility for batch-level augmentation.
 """
 
+import albumentations as A
 import numpy as np
 import torch
-import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
 from . import config

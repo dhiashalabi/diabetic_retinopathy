@@ -240,7 +240,7 @@ def plot_training_curves(
     axes[2].legend()
     axes[2].grid(True, alpha=0.3)
 
-    # Mark phase boundary (Phase 1 = PHASE1_EPOCHS)
+    # Mark phase boundaries
     p1_end = config.PHASE1_EPOCHS
     if p1_end < len(history["train_loss"]):
         for ax in axes:
@@ -249,8 +249,21 @@ def plot_training_curves(
                 color="grey",
                 ls="--",
                 alpha=0.6,
-                label="Fine-tune start" if ax == axes[0] else None,
+                label="Partial unfreeze" if ax == axes[0] else None,
             )
+
+    p2_end = config.PHASE1_EPOCHS + config.PHASE2_EPOCHS
+    if p2_end < len(history["train_loss"]):
+        for ax in axes:
+            ax.axvline(
+                p2_end + 0.5,
+                color="grey",
+                ls=":",
+                alpha=0.6,
+                label="Full unfreeze" if ax == axes[0] else None,
+            )
+
+    if p1_end < len(history["train_loss"]):
         axes[0].legend()
 
     plt.tight_layout()
@@ -445,11 +458,11 @@ def predict_single_image(
         ax1.axis("off")
 
         colors = ["#2ecc71" if i == pred_idx else "#95a5a6" for i in range(len(class_names))]
-        bars = ax2.barh(class_names, probs, color=colors, edgecolor="black", linewidth=0.5)
+        ax2.barh(class_names, probs, color=colors, edgecolor="black", linewidth=0.5)
         ax2.set_xlim(0, 1)
         ax2.set_xlabel("Probability", fontsize=12)
         ax2.set_title("Class Probabilities", fontsize=13)
-        for i, (p, _) in enumerate(zip(probs, class_names)):
+        for i, (p, _) in enumerate(zip(probs, class_names, strict=True)):
             ax2.text(p + 0.01, i, f"{p:.1%}", va="center", fontsize=10)
 
         plt.tight_layout()

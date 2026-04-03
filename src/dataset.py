@@ -197,7 +197,7 @@ class DRDataset(Dataset):
         if p is not None:
             return p
         raise FileNotFoundError(
-            f"Image not found for '{img_id}' in {self.images_dir} (tried .jpeg/.jpg/.png)"
+            f"Image not found for '{img_id}' in {self.images_dir} (tried .jpeg/.jpg/.png/.webp)"
         )
 
     def __len__(self) -> int:

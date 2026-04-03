@@ -133,8 +133,9 @@ def unfreeze_backbone(model: DRModel, from_block: str | None = None) -> None:
                 if feature_indices:
                     # Convert to sorted list and apply slice
                     sorted_indices = sorted(feature_indices)
-                    # Evaluate slice (e.g., "-2:" on [0,1,2,3,4,5,6,7] gives [6,7])
-                    slice_obj = eval(f"slice({slice_str})")
+                    parts = slice_str.split(",")
+                    args = [int(p.strip()) if p.strip() else None for p in parts]
+                    slice_obj = slice(*args)
                     unfrozen_indices = sorted_indices[slice_obj]
 
                     # Build candidate prefixes for unfrozen blocks

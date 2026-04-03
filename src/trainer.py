@@ -14,7 +14,6 @@ import math
 import os
 import time
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -415,6 +414,8 @@ class Trainer:
 
         Returns True if the phase completed normally, False if early-stopped.
         """
+        self.best_kappa = -1.0
+
         criterion = self._build_criterion()
 
         optimizer = torch.optim.AdamW(
@@ -434,9 +435,7 @@ class Trainer:
         )
 
         logger.info(f"\n{'=' * 60}")
-        logger.info(
-            f"Phase: {phase.upper()} | Epochs: {epochs} | LR: {lr} | Mixup: {use_mixup}"
-        )
+        logger.info(f"Phase: {phase.upper()} | Epochs: {epochs} | LR: {lr} | Mixup: {use_mixup}")
         logger.info(f"{'=' * 60}")
 
         early_stopped = False
