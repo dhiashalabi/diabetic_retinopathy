@@ -22,7 +22,7 @@ Thumbs.db
 desktop.ini
 
 # Project outputs (large checkpoints, logs, figures)
-outputs/
+# outputs/
 
 # Dataset (multi-GB, download via Kaggle)
 dataset/
