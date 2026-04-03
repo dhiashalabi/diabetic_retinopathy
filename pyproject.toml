@@ -1,7 +1,7 @@
 [project]
 name = "diabetic-retinopathy"
 version = "0.1.0"
-description = "Diabetic Retinopathy detection from retinal fundus images using EfficientNet-B4"
+description = "Diabetic Retinopathy detection from retinal fundus images using EfficientNet-B3"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

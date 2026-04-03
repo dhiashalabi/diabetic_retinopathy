@@ -1,19 +1,55 @@
 """
 Albumentations transform pipelines for training and evaluation.
 
-Training uses heavy, ophthalmology-appropriate augmentations.
-Validation / test uses only deterministic resize + normalise.
+Provides three training pipelines:
+- Light transforms (Phase 1, head-only): flips + mild colour jitter
+- Full transforms (Phase 2/3, fine-tuning): aggressive geometric + photometric
+- Validation / test: deterministic resize + normalise
+
+Also includes Mixup utility for batch-level augmentation.
 """
 
+import numpy as np
+import torch
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
 from . import config
 
 
+def get_light_train_transforms(img_size: int = config.IMG_SIZE) -> A.Compose:
+    """
+    Mild augmentation for Phase 1 (head-only training).
+
+    When the backbone is frozen, heavy distortions add noise to the
+    feature vectors without benefit. Light augmentations let the head
+    learn clean decision boundaries first.
+    """
+    return A.Compose(
+        [
+            A.RandomResizedCrop(
+                size=(img_size, img_size),
+                scale=(0.85, 1.0),
+                ratio=(0.95, 1.05),
+                p=1.0,
+            ),
+            A.HorizontalFlip(p=0.5),
+            A.VerticalFlip(p=0.5),
+            A.RandomRotate90(p=0.5),
+            A.RandomBrightnessContrast(
+                brightness_limit=0.1,
+                contrast_limit=0.1,
+                p=0.3,
+            ),
+            A.Normalize(mean=config.IMG_MEAN, std=config.IMG_STD),
+            ToTensorV2(),
+        ]
+    )
+
+
 def get_train_transforms(img_size: int = config.IMG_SIZE) -> A.Compose:
     """
-    Aggressive augmentation for training.
+    Aggressive augmentation for Phase 2/3 fine-tuning.
 
     Retinal images are rotation-invariant (camera orientation varies),
     so flips and large rotations are safe.  Brightness / contrast jitter
@@ -69,7 +105,7 @@ def get_train_transforms(img_size: int = config.IMG_SIZE) -> A.Compose:
                     A.GridDistortion(num_steps=5, distort_limit=0.3, p=1.0),
                     A.OpticalDistortion(distort_limit=0.3, p=1.0),
                 ],
-                p=0.2,
+                p=0.15,
             ),
             A.CoarseDropout(
                 num_holes_range=(1, 8),
@@ -108,13 +144,9 @@ def get_tta_transforms(img_size: int = config.IMG_SIZE) -> list[A.Compose]:
     ]
 
     return [
-        # Original
         A.Compose([A.Resize(img_size, img_size)] + base_norm),
-        # Horizontal flip
         A.Compose([A.Resize(img_size, img_size), A.HorizontalFlip(p=1.0)] + base_norm),
-        # Vertical flip
         A.Compose([A.Resize(img_size, img_size), A.VerticalFlip(p=1.0)] + base_norm),
-        # 90-degree rotation
         A.Compose(
             [
                 A.Resize(img_size, img_size),
@@ -123,3 +155,27 @@ def get_tta_transforms(img_size: int = config.IMG_SIZE) -> list[A.Compose]:
             + base_norm
         ),
     ]
+
+
+def mixup_data(
+    images: torch.Tensor,
+    labels: torch.Tensor,
+    alpha: float = config.MIXUP_ALPHA,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, float]:
+    """
+    Apply Mixup augmentation to a batch.
+
+    Blends pairs of images and returns both label sets so the loss can
+    be computed as: loss = lam * loss(pred, y_a) + (1 - lam) * loss(pred, y_b)
+
+    Returns (mixed_images, labels_a, labels_b, lam).
+    """
+    if alpha <= 0:
+        return images, labels, labels, 1.0
+
+    lam = np.random.beta(alpha, alpha)
+    batch_size = images.size(0)
+    index = torch.randperm(batch_size, device=images.device)
+
+    mixed = lam * images + (1 - lam) * images[index]
+    return mixed, labels, labels[index], lam

@@ -1,12 +1,11 @@
 """
-PyTorch Dataset, patient-level splitting, and DataLoader factory
-with professional-grade class balancing.
+PyTorch Dataset, patient-level splitting, and DataLoader factory.
 
-Balancing strategy (multi-pronged):
+Balancing strategy:
   1. Patient-level stratified split — no data leakage
-  2. WeightedRandomSampler — balanced mini-batches
-  3. Class-weighted loss — higher penalty for minority classes
-  4. Heavy augmentation on minority classes (via augmentations.py)
+  2. WeightedRandomSampler — balanced mini-batches (controlled by config.USE_WEIGHTED_SAMPLER)
+  3. Class-weighted loss — available via config.USE_CLASS_WEIGHTED_LOSS (off by default
+     to avoid double-rebalancing when sampler is active)
 """
 
 import json
@@ -256,20 +255,19 @@ def create_dataloaders(
     batch_size: int = config.PHASE1_BATCH_SIZE,
     num_workers: int = config.NUM_WORKERS,
     preprocessing: bool = True,
-    use_sampler: bool = True,
+    use_sampler: bool = config.USE_WEIGHTED_SAMPLER,
     sampler_seed: int | None = config.SEED,
     fail_on_missing: bool = config.CACHE_FAIL_ON_MISSING,
 ) -> dict[str, DataLoader]:
     """
-    Build DataLoaders with balanced sampling for training.
+    Build DataLoaders with optional balanced sampling for training.
 
     Parameters
     ----------
     use_sampler : bool
         If True, use WeightedRandomSampler on the training set so each
-        mini-batch is approximately class-balanced.  This is the primary
-        mechanism for handling the severe 73% / 5% / 15% / 2% / 5%
-        imbalance in the DR dataset.
+        mini-batch is approximately class-balanced.  Defaults to
+        ``config.USE_WEIGHTED_SAMPLER``.
 
     Returns
     -------

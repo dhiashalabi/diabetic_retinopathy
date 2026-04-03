@@ -1,9 +1,9 @@
 """
 EfficientNet-B3 model builder with freeze / unfreeze utilities.
 
-Architecture choices targeting high accuracy:
-- timm pretrained weights (ImageNet-1k, top-1  ~82%)
-- Custom head: pooling -> BN -> dropout -> FC -> BN -> dropout -> FC
+Architecture choices targeting high accuracy on DR grading:
+- timm pretrained EfficientNet-B3 weights (ImageNet-1k, top-1 ~83.3%)
+- Custom two-layer classification head with BatchNorm and Dropout
 - Three-phase training: head-only, partial unfreeze, full unfreeze
 - BatchNorm freezing during fine-tuning to preserve ImageNet statistics
 """

@@ -1,5 +1,5 @@
 """
-Grad-CAM implementation for EfficientNet-B4 explainability.
+Grad-CAM implementation for EfficientNet-B3 explainability.
 
 Generates class-discriminative heatmaps highlighting the retinal
 regions most influential for each DR severity prediction — critical
@@ -152,7 +152,7 @@ def get_target_layer(model) -> nn.Module:
     """
     Automatically locate the last convolutional block of a timm backbone.
 
-    For EfficientNet-B4, this is the last block in ``model.backbone.blocks``.
+    For EfficientNet-B3, this is the last block in ``model.backbone.blocks``.
     """
     backbone = model.backbone if hasattr(model, "backbone") else model
 

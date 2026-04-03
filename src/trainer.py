@@ -1,40 +1,43 @@
 """
-Training engine with AMP, early stopping on QWK, cosine LR with warmup,
-gradient clipping, and two-phase schedule.
+Three-phase training engine with AMP, ordinal-aware loss, Mixup,
+early stopping on QWK, cosine LR with warmup, and gradient clipping.
 
-Designed for maximum accuracy on the DR grading task:
-- Phase 1: head-only with high LR
-- Phase 2: fine-tune with low LR, warmup, and cosine decay
-- Checkpointing on Quadratic Weighted Kappa (clinical metric)
-- Label smoothing + class-weighted loss
-- Mixed-precision training for speed
+Phase 1 — head-only with light augmentation (high LR, no warmup)
+Phase 2 — partial unfreeze with full augmentation + Mixup (low LR, warmup)
+Phase 3 — full unfreeze with full augmentation + Mixup (very low LR, warmup)
+
+Checkpointing on Quadratic Weighted Kappa (the clinical gold-standard metric).
 """
 
 import json
+import math
 import os
 import time
 
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from sklearn.metrics import cohen_kappa_score
 from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from . import config
+from .augmentations import mixup_data
 from .utils import get_logger
 
 logger = get_logger(__name__)
 
 
+# -----------------------------------------------------------------------
+# Loss functions
+# -----------------------------------------------------------------------
+
+
 class LabelSmoothingCrossEntropy(nn.Module):
     """
-    Cross-entropy with label smoothing *and* class weights.
-
-    Combines two strategies for accuracy on imbalanced ordinal data:
-    - Label smoothing prevents overconfident predictions
-    - Class weights up-weight rare severe/proliferative cases
+    Cross-entropy with optional label smoothing and class weights.
     """
 
     def __init__(
@@ -50,7 +53,7 @@ class LabelSmoothingCrossEntropy(nn.Module):
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         weight = self.weight.to(pred.device) if self.weight is not None else None
-        return nn.functional.cross_entropy(
+        return F.cross_entropy(
             pred,
             target,
             weight=weight,
@@ -58,13 +61,86 @@ class LabelSmoothingCrossEntropy(nn.Module):
         )
 
 
-class CosineWarmupScheduler:
+class OrdinalCrossEntropy(nn.Module):
     """
-    Linear warmup followed by cosine annealing.
+    Cross-entropy with ordinal-aware soft targets.
 
-    Warmup prevents destabilising the pretrained weights during the
-    first few epochs of fine-tuning.
+    Instead of a hard one-hot target, constructs a soft distribution where
+    the true class gets most mass but neighbouring classes receive some mass
+    weighted by 1 / (1 + distance^2).  This naturally penalises far-off
+    predictions more than near misses, aligning the loss with the QWK metric.
+
+    Parameters
+    ----------
+    num_classes : int
+        Number of ordinal classes.
+    smoothing : float
+        Total probability mass spread to non-true classes (similar to label
+        smoothing but distributed according to ordinal distance).
+    weight : torch.Tensor or None
+        Per-class weights for rebalancing (only used when
+        config.USE_CLASS_WEIGHTED_LOSS is True).
     """
+
+    def __init__(
+        self,
+        num_classes: int = config.NUM_CLASSES,
+        smoothing: float = config.LABEL_SMOOTHING,
+        weight: torch.Tensor | None = None,
+    ):
+        super().__init__()
+        self.num_classes = num_classes
+        self.smoothing = smoothing
+        self.weight = weight
+
+        soft_targets = self._build_soft_targets(num_classes, smoothing)
+        self.register_buffer("soft_targets", soft_targets)
+
+    @staticmethod
+    def _build_soft_targets(num_classes: int, smoothing: float) -> torch.Tensor:
+        """
+        Build an (num_classes, num_classes) matrix of ordinal soft targets.
+
+        Row k is the target distribution when the true class is k.
+        """
+        targets = torch.zeros(num_classes, num_classes)
+        for k in range(num_classes):
+            raw_weights = torch.zeros(num_classes)
+            for j in range(num_classes):
+                if j == k:
+                    continue
+                dist = abs(k - j)
+                raw_weights[j] = 1.0 / (1.0 + dist * dist)
+
+            if raw_weights.sum() > 0:
+                raw_weights = raw_weights / raw_weights.sum() * smoothing
+
+            targets[k] = raw_weights
+            targets[k, k] = 1.0 - smoothing
+
+        return targets
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        log_probs = F.log_softmax(pred, dim=1)
+        soft = self.soft_targets[target]  # (B, C)
+
+        per_sample_loss = -(soft * log_probs).sum(dim=1)  # (B,)
+
+        if self.weight is not None:
+            w = self.weight.to(pred.device)
+            sample_w = w[target]
+            per_sample_loss = per_sample_loss * sample_w
+
+        return per_sample_loss.mean()
+
+
+# -----------------------------------------------------------------------
+# Learning rate scheduler
+# -----------------------------------------------------------------------
+
+
+class CosineWarmupScheduler:
+    """Linear warmup followed by cosine annealing."""
 
     def __init__(self, optimizer, warmup_epochs: int, total_epochs: int, min_lr: float = 1e-7):
         self.optimizer = optimizer
@@ -75,18 +151,21 @@ class CosineWarmupScheduler:
 
     def step(self, epoch: int):
         if epoch < self.warmup_epochs:
-            # Linear warmup
             factor = (epoch + 1) / self.warmup_epochs
         else:
-            # Cosine decay
             progress = (epoch - self.warmup_epochs) / max(1, self.total_epochs - self.warmup_epochs)
-            factor = 0.5 * (1.0 + np.cos(np.pi * progress))
+            factor = 0.5 * (1.0 + math.cos(math.pi * progress))
 
         for pg, base_lr in zip(self.optimizer.param_groups, self.base_lrs, strict=True):
             pg["lr"] = max(base_lr * factor, self.min_lr)
 
     def get_last_lr(self) -> list[float]:
         return [pg["lr"] for pg in self.optimizer.param_groups]
+
+
+# -----------------------------------------------------------------------
+# Early stopping
+# -----------------------------------------------------------------------
 
 
 class EarlyStopping:
@@ -138,16 +217,23 @@ class EarlyStopping:
         self.should_stop = d["should_stop"]
 
 
+# -----------------------------------------------------------------------
+# Trainer
+# -----------------------------------------------------------------------
+
+
 class Trainer:
     """
-    Two-phase training engine for the DR classifier.
+    Three-phase training engine for the DR classifier.
 
-    Optimised for high accuracy with:
+    Features:
     - Mixed-precision training (AMP)
-    - Gradient clipping to stabilise fine-tuning
-    - Label-smoothed, class-weighted loss
+    - Gradient clipping for stable fine-tuning
+    - Ordinal-aware or label-smoothed cross-entropy loss
+    - Optional Mixup augmentation (Phase 2/3)
     - Checkpointing on QWK (the clinical gold-standard metric)
-    - Cosine LR with warmup for Phase 2
+    - Cosine LR with warmup
+    - Phase-aware data loaders (light augmentation for Phase 1)
     """
 
     def __init__(
@@ -158,7 +244,7 @@ class Trainer:
     ):
         self.model = model.to(device)
         self.device = device
-        self.class_weights = class_weights
+        self.class_weights = class_weights if config.USE_CLASS_WEIGHTED_LOSS else None
         self.scaler = GradScaler(device.type, enabled=device.type == "cuda")
         self.history: dict[str, list] = {
             "train_loss": [],
@@ -172,26 +258,34 @@ class Trainer:
         self.best_kappa = -1.0
 
     def _build_criterion(self) -> nn.Module:
+        if config.USE_ORDINAL_LOSS:
+            return OrdinalCrossEntropy(
+                weight=self.class_weights,
+                smoothing=config.LABEL_SMOOTHING,
+            )
         return LabelSmoothingCrossEntropy(
             weight=self.class_weights,
             smoothing=config.LABEL_SMOOTHING,
         )
 
-    def train_one_epoch(
-        self,
-        loader: DataLoader,
-        optimizer: torch.optim.Optimizer,
-        criterion: nn.Module,
-    ) -> dict:
-        self.model.train()
-
-        # Keep BN frozen in backbone during fine-tune
+    def _freeze_backbone_bn(self):
+        """Keep BatchNorm layers in eval mode during fine-tuning."""
         from .model import DRModel
 
         if isinstance(self.model, DRModel):
             for module in self.model.backbone.modules():
                 if isinstance(module, (nn.BatchNorm2d, nn.SyncBatchNorm)):
                     module.eval()
+
+    def train_one_epoch(
+        self,
+        loader: DataLoader,
+        optimizer: torch.optim.Optimizer,
+        criterion: nn.Module,
+        use_mixup: bool = False,
+    ) -> dict:
+        self.model.train()
+        self._freeze_backbone_bn()
 
         running_loss = 0.0
         correct = 0
@@ -204,11 +298,17 @@ class Trainer:
             images = images.to(self.device, non_blocking=True)
             labels = labels.to(self.device, non_blocking=True)
 
+            if use_mixup and config.USE_MIXUP:
+                images, labels_a, labels_b, lam = mixup_data(images, labels)
+            else:
+                labels_a = labels_b = labels
+                lam = 1.0
+
             optimizer.zero_grad(set_to_none=True)
 
             with autocast("cuda", enabled=self.device.type == "cuda"):
                 outputs = self.model(images)
-                loss = criterion(outputs, labels)
+                loss = lam * criterion(outputs, labels_a) + (1 - lam) * criterion(outputs, labels_b)
 
             self.scaler.scale(loss).backward()
             self.scaler.unscale_(optimizer)
@@ -219,13 +319,13 @@ class Trainer:
             self.scaler.step(optimizer)
             self.scaler.update()
 
-            batch_size = labels.size(0)
+            batch_size = labels_a.size(0)
             running_loss += loss.item() * batch_size
             preds = outputs.argmax(dim=1)
-            correct += (preds == labels).sum().item()
+            correct += (preds == labels_a).sum().item()
             total += batch_size
             all_preds.append(preds.detach())
-            all_labels.append(labels.detach())
+            all_labels.append(labels_a.detach())
 
             pbar.set_postfix(
                 loss=f"{loss.item():.4f}",
@@ -308,9 +408,10 @@ class Trainer:
         lr: float,
         weight_decay: float,
         warmup_epochs: int = 0,
+        use_mixup: bool = False,
     ) -> bool:
         """
-        Run one training phase (head-only or fine-tuning).
+        Run one training phase.
 
         Returns True if the phase completed normally, False if early-stopped.
         """
@@ -333,7 +434,9 @@ class Trainer:
         )
 
         logger.info(f"\n{'=' * 60}")
-        logger.info(f"Phase: {phase.upper()} | Epochs: {epochs} | LR: {lr}")
+        logger.info(
+            f"Phase: {phase.upper()} | Epochs: {epochs} | LR: {lr} | Mixup: {use_mixup}"
+        )
         logger.info(f"{'=' * 60}")
 
         early_stopped = False
@@ -348,10 +451,10 @@ class Trainer:
                 train_loader,
                 optimizer,
                 criterion,
+                use_mixup=use_mixup,
             )
             val_metrics = self.validate(valid_loader, criterion)
 
-            # Append to global history
             for split, metrics in [("train", train_metrics), ("val", val_metrics)]:
                 self.history[f"{split}_loss"].append(metrics["loss"])
                 self.history[f"{split}_acc"].append(metrics["acc"])
@@ -391,18 +494,26 @@ class Trainer:
         self,
         train_loader: DataLoader,
         valid_loader: DataLoader,
+        train_loader_light: DataLoader | None = None,
     ) -> dict:
         """
         Full three-phase training pipeline.
 
-        Phase 1 — head-only (high LR, no warmup)
-        Phase 2 — partial unfreeze features[-2:] (low LR, warmup)
-        Phase 3 — full unfreeze (very low LR, warmup)
+        Parameters
+        ----------
+        train_loader : DataLoader
+            Training loader with full (heavy) augmentation for Phase 2/3.
+        valid_loader : DataLoader
+            Validation loader (deterministic transforms).
+        train_loader_light : DataLoader or None
+            Training loader with light augmentation for Phase 1 (head-only).
+            If None, ``train_loader`` is used for all phases.
         """
         from .model import count_parameters, freeze_backbone, unfreeze_backbone
 
-        # ---- Phase 1: Head Only ----
-        phase1_trainable = None
+        phase1_loader = train_loader_light if train_loader_light is not None else train_loader
+
+        # ---- Phase 1: Head Only (light augmentation, no Mixup) ----
         freeze_backbone(self.model)
         params = count_parameters(self.model)
         phase1_trainable = params["trainable"]
@@ -413,21 +524,22 @@ class Trainer:
 
         self.fit_phase(
             phase="phase1",
-            train_loader=train_loader,
+            train_loader=phase1_loader,
             valid_loader=valid_loader,
             epochs=config.PHASE1_EPOCHS,
             lr=config.PHASE1_LR,
             weight_decay=config.PHASE1_WEIGHT_DECAY,
             warmup_epochs=0,
+            use_mixup=False,
         )
 
-        # ---- Phase 2: Partial Unfreeze (features[-2:]) ----
+        # ---- Phase 2: Partial Unfreeze (full augmentation + Mixup) ----
         if self.device.type == "cuda":
             torch.cuda.empty_cache()
         unfreeze_backbone(self.model, from_block=config.PHASE2_UNFREEZE_FROM)
 
         params = count_parameters(self.model)
-        if phase1_trainable is not None and params["trainable"] <= phase1_trainable:
+        if params["trainable"] <= phase1_trainable:
             raise RuntimeError(
                 "Phase 2 fine-tuning did not increase trainable parameters. "
                 "Check PHASE2_UNFREEZE_FROM and backbone parameter names."
@@ -445,12 +557,13 @@ class Trainer:
             lr=config.PHASE2_LR,
             weight_decay=config.PHASE2_WEIGHT_DECAY,
             warmup_epochs=config.PHASE2_WARMUP_EPOCHS,
+            use_mixup=True,
         )
 
-        # ---- Phase 3: Full Unfreeze ----
+        # ---- Phase 3: Full Unfreeze (full augmentation + Mixup) ----
         if self.device.type == "cuda":
             torch.cuda.empty_cache()
-        unfreeze_backbone(self.model, from_block=None)  # Full unfreeze all parameters
+        unfreeze_backbone(self.model, from_block=None)
 
         params = count_parameters(self.model)
         logger.info(
@@ -466,9 +579,10 @@ class Trainer:
             lr=config.PHASE3_LR,
             weight_decay=config.PHASE3_WEIGHT_DECAY,
             warmup_epochs=config.PHASE3_WARMUP_EPOCHS,
+            use_mixup=True,
         )
 
-        # All done — save final history
+        # Save final history
         history_path = os.path.join(config.LOGS_DIR, "training_history.json")
 
         def _sanitize(v):

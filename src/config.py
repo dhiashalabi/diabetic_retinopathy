@@ -63,7 +63,7 @@ SEED = 42
 # ---------------------------------------------------------------------------
 # Image & Model
 # ---------------------------------------------------------------------------
-IMG_SIZE = 300  # EfficientNet-B3 native resolution
+IMG_SIZE = 384  # Larger than B3 native (300) for better small-lesion detection
 IMG_MEAN = [0.485, 0.456, 0.406]  # ImageNet stats
 IMG_STD = [0.229, 0.224, 0.225]
 MODEL_NAME = "efficientnet_b3"
@@ -78,40 +78,59 @@ TEST_RATIO = 0.15
 # ---------------------------------------------------------------------------
 # Training — Phase 1 (head only, frozen backbone)
 # ---------------------------------------------------------------------------
-PHASE1_EPOCHS = 5
-PHASE1_LR = 1e-3
+PHASE1_EPOCHS = 8
+PHASE1_LR = 3e-4
 PHASE1_WEIGHT_DECAY = 1e-4
-PHASE1_BATCH_SIZE = 64
+PHASE1_BATCH_SIZE = 32
 
 # ---------------------------------------------------------------------------
 # Training — Phase 2 (partial unfreeze: features[-2:])
 # ---------------------------------------------------------------------------
-PHASE2_EPOCHS = 10
-PHASE2_LR = 2e-5
+PHASE2_EPOCHS = 15
+PHASE2_LR = 5e-5
 PHASE2_WEIGHT_DECAY = 1e-4
-PHASE2_BATCH_SIZE = 64
+PHASE2_BATCH_SIZE = 32
 PHASE2_WARMUP_EPOCHS = 2
 PHASE2_UNFREEZE_FROM = "features[-2:]"
 
 # ---------------------------------------------------------------------------
 # Training — Phase 3 (full unfreeze)
 # ---------------------------------------------------------------------------
-PHASE3_EPOCHS = 20
-PHASE3_LR = 1e-5
+PHASE3_EPOCHS = 25
+PHASE3_LR = 2e-5
 PHASE3_WEIGHT_DECAY = 1e-4
-PHASE3_BATCH_SIZE = 64
+PHASE3_BATCH_SIZE = 32
 PHASE3_WARMUP_EPOCHS = 2
 
 # ---------------------------------------------------------------------------
 # Shared training settings
 # ---------------------------------------------------------------------------
-LABEL_SMOOTHING = 0.1
-DROPOUT_RATE = 0.4
+LABEL_SMOOTHING = 0.05
+DROPOUT_RATE = 0.3
 GRADIENT_CLIP_NORM = 1.0
-EARLY_STOPPING_PATIENCE = 10
+EARLY_STOPPING_PATIENCE = 7
 
-# DataLoader worker defaults differ by platform. On Windows, too many workers can
-# reduce throughput because process spawning is relatively expensive.
+# ---------------------------------------------------------------------------
+# Class balancing strategy
+# ---------------------------------------------------------------------------
+# CRITICAL: use only ONE rebalancing mechanism to avoid over-weighting
+# minority classes. WeightedRandomSampler is preferred because it balances
+# the batches without distorting the loss magnitude.
+USE_WEIGHTED_SAMPLER = True
+USE_CLASS_WEIGHTED_LOSS = False
+
+# ---------------------------------------------------------------------------
+# Ordinal-aware training
+# ---------------------------------------------------------------------------
+USE_ORDINAL_LOSS = True
+
+# ---------------------------------------------------------------------------
+# Mixup augmentation (applied during Phase 2 and Phase 3 only)
+# ---------------------------------------------------------------------------
+USE_MIXUP = True
+MIXUP_ALPHA = 0.2
+
+# DataLoader worker defaults differ by platform.
 if IS_COLAB:
     NUM_WORKERS = 2
 else:
@@ -124,7 +143,7 @@ PIN_MEMORY = True
 # ---------------------------------------------------------------------------
 # Preprocessing cache
 # ---------------------------------------------------------------------------
-PREPROCESSING_CACHE_VERSION = "v2"
+PREPROCESSING_CACHE_VERSION = "v3"
 CACHE_IMAGE_FORMAT = "png"  # supported: jpg, jpeg, png, webp
 CACHE_IMAGE_QUALITY = 95
 CACHE_PNG_COMPRESSION = 3

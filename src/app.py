@@ -33,7 +33,7 @@ def load_model(checkpoint_path: str | None = None, device: str = "auto"):
     if checkpoint_path is None:
         checkpoint_path = os.path.join(
             config.CHECKPOINTS_DIR,
-            "best_model_phase2.pth",
+            "best_model_phase3.pth",
         )
 
     if os.path.exists(checkpoint_path):
@@ -87,8 +87,8 @@ def create_app(checkpoint_path: str | None = None):
         title="Diabetic Retinopathy Detection",
         description=(
             "Upload a retinal fundus image to detect the severity of "
-            "Diabetic Retinopathy. The model uses EfficientNet-B4 with "
-            "CLAHE and Ben Graham preprocessing.\n\n"
+            "Diabetic Retinopathy. The model uses EfficientNet-B3 with "
+            "CLAHE preprocessing.\n\n"
             "**Disclaimer:** This tool is for research and educational "
             "purposes only. It is NOT a certified medical device and must "
             "not be used as a substitute for professional medical diagnosis."
