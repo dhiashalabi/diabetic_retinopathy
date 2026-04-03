@@ -25,7 +25,11 @@ desktop.ini
 # outputs/
 
 # Dataset (multi-GB, download via Kaggle)
-dataset/
+# Use dataset/* (not dataset/) so we can un-ignore specific paths under dataset/
+dataset/*
+!dataset/preprocessed_384/
+dataset/preprocessed_384/*
+!dataset/preprocessed_384/cache_meta.json
 *.zip
 
 # Virtual environments
