@@ -121,7 +121,8 @@ class OrdinalCrossEntropy(nn.Module):
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         log_probs = F.log_softmax(pred, dim=1)
-        soft = self.soft_targets[target]  # (B, C)
+        # soft_targets may still be on CPU if criterion was not .to(device) (e.g. model comparison notebook)
+        soft = self.soft_targets.to(pred.device)[target]  # (B, C)
 
         per_sample_loss = -(soft * log_probs).sum(dim=1)  # (B,)
 
