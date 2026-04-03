@@ -4,7 +4,7 @@ early stopping on QWK, cosine LR with warmup, and gradient clipping.
 
 Phase 1 — head-only with light augmentation (high LR, no warmup)
 Phase 2 — partial unfreeze with full augmentation + Mixup (low LR, warmup)
-Phase 3 — full unfreeze with full augmentation + Mixup (very low LR, warmup)
+Phase 3 — full unfreeze with full augmentation (Mixup optional via config)
 
 Checkpointing on Quadratic Weighted Kappa (the clinical gold-standard metric).
 """
@@ -282,9 +282,12 @@ class Trainer:
         optimizer: torch.optim.Optimizer,
         criterion: nn.Module,
         use_mixup: bool = False,
+        use_amp: bool = True,
     ) -> dict:
         self.model.train()
         self._freeze_backbone_bn()
+
+        amp_on = bool(use_amp and self.device.type == "cuda")
 
         running_loss = 0.0
         correct = 0
@@ -305,18 +308,35 @@ class Trainer:
 
             optimizer.zero_grad(set_to_none=True)
 
-            with autocast("cuda", enabled=self.device.type == "cuda"):
+            with autocast("cuda", enabled=amp_on):
                 outputs = self.model(images)
                 loss = lam * criterion(outputs, labels_a) + (1 - lam) * criterion(outputs, labels_b)
 
-            self.scaler.scale(loss).backward()
-            self.scaler.unscale_(optimizer)
-            nn.utils.clip_grad_norm_(
-                self.model.parameters(),
-                config.GRADIENT_CLIP_NORM,
-            )
-            self.scaler.step(optimizer)
-            self.scaler.update()
+            if not torch.isfinite(loss).all():
+                logger.warning(
+                    "Non-finite training loss; skipping batch"
+                    + (" (GradScaler updated)." if amp_on else ".")
+                )
+                if amp_on:
+                    self.scaler.update()
+                continue
+
+            if amp_on:
+                self.scaler.scale(loss).backward()
+                self.scaler.unscale_(optimizer)
+                nn.utils.clip_grad_norm_(
+                    self.model.parameters(),
+                    config.GRADIENT_CLIP_NORM,
+                )
+                self.scaler.step(optimizer)
+                self.scaler.update()
+            else:
+                loss.backward()
+                nn.utils.clip_grad_norm_(
+                    self.model.parameters(),
+                    config.GRADIENT_CLIP_NORM,
+                )
+                optimizer.step()
 
             batch_size = labels_a.size(0)
             running_loss += loss.item() * batch_size
@@ -343,8 +363,15 @@ class Trainer:
         return {"loss": epoch_loss, "acc": epoch_acc, "kappa": epoch_kappa}
 
     @torch.no_grad()
-    def validate(self, loader: DataLoader, criterion: nn.Module) -> dict:
+    def validate(
+        self,
+        loader: DataLoader,
+        criterion: nn.Module,
+        use_amp: bool = True,
+    ) -> dict:
         self.model.eval()
+
+        amp_on = bool(use_amp and self.device.type == "cuda")
 
         running_loss = 0.0
         correct = 0
@@ -357,11 +384,14 @@ class Trainer:
             images = images.to(self.device, non_blocking=True)
             labels = labels.to(self.device, non_blocking=True)
 
-            with autocast("cuda", enabled=self.device.type == "cuda"):
+            with autocast("cuda", enabled=amp_on):
                 outputs = self.model(images)
                 loss = criterion(outputs, labels)
 
             batch_size = labels.size(0)
+            if not torch.isfinite(loss).all():
+                logger.warning("Non-finite validation loss; skipping batch in metrics.")
+                continue
             running_loss += loss.item() * batch_size
             preds = outputs.argmax(dim=1)
             correct += (preds == labels).sum().item()
@@ -370,7 +400,7 @@ class Trainer:
             all_labels.append(labels.detach())
 
         if total == 0:
-            return {"loss": 0.0, "acc": 0.0, "kappa": 0.0}
+            return {"loss": float("nan"), "acc": 0.0, "kappa": 0.0}
 
         epoch_loss = running_loss / total
         epoch_acc = correct / total
@@ -408,6 +438,7 @@ class Trainer:
         weight_decay: float,
         warmup_epochs: int = 0,
         use_mixup: bool = False,
+        use_amp: bool = True,
     ) -> bool:
         """
         Run one training phase.
@@ -435,7 +466,10 @@ class Trainer:
         )
 
         logger.info(f"\n{'=' * 60}")
-        logger.info(f"Phase: {phase.upper()} | Epochs: {epochs} | LR: {lr} | Mixup: {use_mixup}")
+        logger.info(
+            f"Phase: {phase.upper()} | Epochs: {epochs} | LR: {lr} | "
+            f"Mixup: {use_mixup} | AMP: {use_amp and self.device.type == 'cuda'}"
+        )
         logger.info(f"{'=' * 60}")
 
         early_stopped = False
@@ -451,8 +485,9 @@ class Trainer:
                 optimizer,
                 criterion,
                 use_mixup=use_mixup,
+                use_amp=use_amp,
             )
-            val_metrics = self.validate(valid_loader, criterion)
+            val_metrics = self.validate(valid_loader, criterion, use_amp=use_amp)
 
             for split, metrics in [("train", train_metrics), ("val", val_metrics)]:
                 self.history[f"{split}_loss"].append(metrics["loss"])
@@ -530,6 +565,7 @@ class Trainer:
             weight_decay=config.PHASE1_WEIGHT_DECAY,
             warmup_epochs=0,
             use_mixup=False,
+            use_amp=True,
         )
 
         # ---- Phase 2: Partial Unfreeze (full augmentation + Mixup) ----
@@ -557,9 +593,10 @@ class Trainer:
             weight_decay=config.PHASE2_WEIGHT_DECAY,
             warmup_epochs=config.PHASE2_WARMUP_EPOCHS,
             use_mixup=True,
+            use_amp=True,
         )
 
-        # ---- Phase 3: Full Unfreeze (full augmentation + Mixup) ----
+        # ---- Phase 3: Full Unfreeze (Mixup usually off — see USE_MIXUP_PHASE3) ----
         if self.device.type == "cuda":
             torch.cuda.empty_cache()
         unfreeze_backbone(self.model, from_block=None)
@@ -570,6 +607,10 @@ class Trainer:
             f"{params['total']:,} total ({params['trainable_pct']:.1f}%)"
         )
 
+        phase3_mixup = bool(config.USE_MIXUP and config.USE_MIXUP_PHASE3)
+        phase3_amp = bool(config.USE_AMP_PHASE3)
+        logger.info(f"Phase 3 Mixup: {phase3_mixup} | AMP (fp16): {phase3_amp}")
+
         self.fit_phase(
             phase="phase3",
             train_loader=train_loader,
@@ -578,7 +619,8 @@ class Trainer:
             lr=config.PHASE3_LR,
             weight_decay=config.PHASE3_WEIGHT_DECAY,
             warmup_epochs=config.PHASE3_WARMUP_EPOCHS,
-            use_mixup=True,
+            use_mixup=phase3_mixup,
+            use_amp=phase3_amp,
         )
 
         # Save final history

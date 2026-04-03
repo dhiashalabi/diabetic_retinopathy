@@ -97,10 +97,17 @@ PHASE2_UNFREEZE_FROM = "blocks[-2:]"  # timm EfficientNet uses blocks.N, not fea
 # Training — Phase 3 (full unfreeze)
 # ---------------------------------------------------------------------------
 PHASE3_EPOCHS = 25
-PHASE3_LR = 2e-5
+# Slightly lower LR than Phase 2 — full backbone + AMP is prone to NaNs if too aggressive
+PHASE3_LR = 1e-5
 PHASE3_WEIGHT_DECAY = 1e-4
 PHASE3_BATCH_SIZE = 32
 PHASE3_WARMUP_EPOCHS = 2
+
+# Mixup + full unfreeze can destabilize training; Phase 2 already used Mixup
+USE_MIXUP_PHASE3 = False
+
+# Full-backbone fine-tune in fp16 often overflows; Phase 3 in FP32 is slower but stable
+USE_AMP_PHASE3 = False
 
 # ---------------------------------------------------------------------------
 # Shared training settings
