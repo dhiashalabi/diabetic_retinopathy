@@ -23,115 +23,11 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from . import config
-from .augmentations import mixup_data
+from .augmentations import mixup_data, mixup_data_class_conditional, consistency_augment
+from .losses import CombinedLoss, FocalLoss, LabelSmoothingCrossEntropy, OrdinalCrossEntropy
 from .utils import get_logger
 
 logger = get_logger(__name__)
-
-
-# -----------------------------------------------------------------------
-# Loss functions
-# -----------------------------------------------------------------------
-
-
-class LabelSmoothingCrossEntropy(nn.Module):
-    """
-    Cross-entropy with optional label smoothing and class weights.
-    """
-
-    def __init__(
-        self,
-        num_classes: int = config.NUM_CLASSES,
-        smoothing: float = config.LABEL_SMOOTHING,
-        weight: torch.Tensor | None = None,
-    ):
-        super().__init__()
-        self.smoothing = smoothing
-        self.num_classes = num_classes
-        self.weight = weight
-
-    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        weight = self.weight.to(pred.device) if self.weight is not None else None
-        return F.cross_entropy(
-            pred,
-            target,
-            weight=weight,
-            label_smoothing=self.smoothing,
-        )
-
-
-class OrdinalCrossEntropy(nn.Module):
-    """
-    Cross-entropy with ordinal-aware soft targets.
-
-    Instead of a hard one-hot target, constructs a soft distribution where
-    the true class gets most mass but neighbouring classes receive some mass
-    weighted by 1 / (1 + distance^2).  This naturally penalises far-off
-    predictions more than near misses, aligning the loss with the QWK metric.
-
-    Parameters
-    ----------
-    num_classes : int
-        Number of ordinal classes.
-    smoothing : float
-        Total probability mass spread to non-true classes (similar to label
-        smoothing but distributed according to ordinal distance).
-    weight : torch.Tensor or None
-        Per-class weights for rebalancing (only used when
-        config.USE_CLASS_WEIGHTED_LOSS is True).
-    """
-
-    def __init__(
-        self,
-        num_classes: int = config.NUM_CLASSES,
-        smoothing: float = config.LABEL_SMOOTHING,
-        weight: torch.Tensor | None = None,
-    ):
-        super().__init__()
-        self.num_classes = num_classes
-        self.smoothing = smoothing
-        self.weight = weight
-
-        soft_targets = self._build_soft_targets(num_classes, smoothing)
-        self.register_buffer("soft_targets", soft_targets)
-
-    @staticmethod
-    def _build_soft_targets(num_classes: int, smoothing: float) -> torch.Tensor:
-        """
-        Build an (num_classes, num_classes) matrix of ordinal soft targets.
-
-        Row k is the target distribution when the true class is k.
-        """
-        targets = torch.zeros(num_classes, num_classes)
-        for k in range(num_classes):
-            raw_weights = torch.zeros(num_classes)
-            for j in range(num_classes):
-                if j == k:
-                    continue
-                dist = abs(k - j)
-                raw_weights[j] = 1.0 / (1.0 + dist * dist)
-
-            if raw_weights.sum() > 0:
-                raw_weights = raw_weights / raw_weights.sum() * smoothing
-
-            targets[k] = raw_weights
-            targets[k, k] = 1.0 - smoothing
-
-        return targets
-
-    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        log_probs = F.log_softmax(pred, dim=1)
-        # soft_targets may still be on CPU if criterion was not .to(device) (e.g. model comparison notebook)
-        soft = self.soft_targets.to(pred.device)[target]  # (B, C)
-
-        per_sample_loss = -(soft * log_probs).sum(dim=1)  # (B,)
-
-        if self.weight is not None:
-            w = self.weight.to(pred.device)
-            sample_w = w[target]
-            per_sample_loss = per_sample_loss * sample_w
-
-        return per_sample_loss.mean()
 
 
 # -----------------------------------------------------------------------
@@ -258,10 +154,22 @@ class Trainer:
         self.best_kappa = -1.0
 
     def _build_criterion(self) -> nn.Module:
-        if config.USE_ORDINAL_LOSS:
+        if config.USE_ORDINAL_LOSS and getattr(config, "USE_FOCAL_LOSS", False):
+            return CombinedLoss(
+                class_weights=self.class_weights,
+                smoothing=config.LABEL_SMOOTHING,
+                focal_gamma=getattr(config, "FOCAL_GAMMA", 2.0),
+            )
+        elif config.USE_ORDINAL_LOSS:
             return OrdinalCrossEntropy(
                 weight=self.class_weights,
                 smoothing=config.LABEL_SMOOTHING,
+            )
+        elif getattr(config, "USE_FOCAL_LOSS", False):
+            return FocalLoss(
+                alpha=self.class_weights,
+                label_smoothing=config.LABEL_SMOOTHING,
+                gamma=getattr(config, "FOCAL_GAMMA", 2.0),
             )
         return LabelSmoothingCrossEntropy(
             weight=self.class_weights,
@@ -301,8 +209,16 @@ class Trainer:
             images = images.to(self.device, non_blocking=True)
             labels = labels.to(self.device, non_blocking=True)
 
+            apply_consistency = getattr(config, "USE_CONSISTENCY_REG", False) and not use_mixup
+            if apply_consistency:
+                aug_images = consistency_augment(images)
+                images = torch.cat([images, aug_images], dim=0)
+
             if use_mixup and config.USE_MIXUP:
-                images, labels_a, labels_b, lam = mixup_data(images, labels)
+                if getattr(config, "USE_CLASS_CONDITIONAL_MIXUP", False):
+                    images, labels_a, labels_b, lam = mixup_data_class_conditional(images, labels)
+                else:
+                    images, labels_a, labels_b, lam = mixup_data(images, labels)
             else:
                 labels_a = labels_b = labels
                 lam = 1.0
@@ -311,7 +227,28 @@ class Trainer:
 
             with autocast("cuda", enabled=amp_on):
                 outputs = self.model(images)
-                loss = lam * criterion(outputs, labels_a) + (1 - lam) * criterion(outputs, labels_b)
+                if apply_consistency:
+                    out_clean, out_aug = torch.chunk(outputs, 2, dim=0)
+                    loss_a = criterion(out_clean, labels_a)
+                    loss = loss_a.mean() if loss_a.dim() > 0 else loss_a
+                    # KL divergence for consistency
+                    log_prob_aug = F.log_softmax(out_aug, dim=1)
+                    prob_clean = F.softmax(out_clean.detach(), dim=1)
+                    kl_loss = F.kl_div(log_prob_aug, prob_clean, reduction="batchmean")
+                    loss = loss + getattr(config, "CONSISTENCY_WEIGHT", 0.5) * kl_loss
+                    outputs = out_clean
+                elif isinstance(lam, torch.Tensor):
+                    # Assume criterion returns reduction="none" vectors
+                    loss_a = criterion(outputs, labels_a)
+                    loss_b = criterion(outputs, labels_b)
+                    loss = (lam * loss_a + (1 - lam) * loss_b).mean()
+                else:
+                    loss_a = criterion(outputs, labels_a)
+                    loss_b = criterion(outputs, labels_b)
+                    if getattr(loss_a, "dim", lambda: 0)() > 0:
+                        loss = (lam * loss_a + (1 - lam) * loss_b).mean()
+                    else:
+                        loss = lam * loss_a + (1 - lam) * loss_b
 
             if not torch.isfinite(loss).all():
                 logger.warning(
@@ -388,6 +325,8 @@ class Trainer:
             with autocast("cuda", enabled=amp_on):
                 outputs = self.model(images)
                 loss = criterion(outputs, labels)
+                if getattr(loss, "dim", lambda: 0)() > 0:
+                    loss = loss.mean()
 
             batch_size = labels.size(0)
             if not torch.isfinite(loss).all():
@@ -450,11 +389,31 @@ class Trainer:
 
         criterion = self._build_criterion().to(self.device)
 
-        optimizer = torch.optim.AdamW(
-            filter(lambda p: p.requires_grad, self.model.parameters()),
-            lr=lr,
-            weight_decay=weight_decay,
-        )
+        if getattr(config, "USE_DISCRIMINATIVE_LR", False) and phase != "phase1":
+            # head gets higher LR, backbone gets base LR
+            head_params = []
+            backbone_params = []
+            for name, param in self.model.named_parameters():
+                if not param.requires_grad:
+                    continue
+                if "head" in name or "global_pool" in name:
+                    head_params.append(param)
+                else:
+                    backbone_params.append(param)
+            
+            optimizer = torch.optim.AdamW(
+                [
+                    {"params": backbone_params, "lr": lr},
+                    {"params": head_params, "lr": lr * getattr(config, "HEAD_LR_MULTIPLIER", 10.0)},
+                ],
+                weight_decay=weight_decay,
+            )
+        else:
+            optimizer = torch.optim.AdamW(
+                filter(lambda p: p.requires_grad, self.model.parameters()),
+                lr=lr,
+                weight_decay=weight_decay,
+            )
 
         scheduler = CosineWarmupScheduler(
             optimizer,
@@ -572,6 +531,7 @@ class Trainer:
         # ---- Phase 2: Partial Unfreeze (full augmentation + Mixup) ----
         if self.device.type == "cuda":
             torch.cuda.empty_cache()
+        self.load_best_checkpoint(phase="phase1")
         unfreeze_backbone(self.model, from_block=config.PHASE2_UNFREEZE_FROM)
 
         params = count_parameters(self.model)
@@ -600,6 +560,7 @@ class Trainer:
         # ---- Phase 3: Full Unfreeze (Mixup usually off — see USE_MIXUP_PHASE3) ----
         if self.device.type == "cuda":
             torch.cuda.empty_cache()
+        self.load_best_checkpoint(phase="phase2")
         unfreeze_backbone(self.model, from_block=None)
 
         params = count_parameters(self.model)

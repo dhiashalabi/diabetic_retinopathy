@@ -55,17 +55,22 @@ def load_and_split_dataframe(
     df = df.drop(columns=cols_to_drop, errors="ignore")
 
     # Standardise column names
-    if "image" in df.columns and "level" in df.columns:
-        pass  # already correct
-    elif "id_code" in df.columns and "diagnosis" in df.columns:
+    if "id_code" in df.columns and "diagnosis" in df.columns:
         df = df.rename(columns={"id_code": "image", "diagnosis": "level"})
+    
+    df["source"] = "eyepacs"
+
+    # Add APTOS dataset if enabled
+    if getattr(config, "USE_APTOS_DATASET", False) and os.path.isfile(config.APTOS_LABELS_CSV):
+        df_aptos = pd.read_csv(config.APTOS_LABELS_CSV)
+        df_aptos = df_aptos.rename(columns={"id_code": "image", "diagnosis": "level"})
+        df_aptos["source"] = "aptos"
+        df = pd.concat([df, df_aptos], ignore_index=True)
 
     df["patient_id"] = df["image"].str.extract(r"(\d+)_")[0]
-    bad_rows = df["patient_id"].isna()
-    if bad_rows.any():
-        _logger.warning(f"Dropped {bad_rows.sum()} rows with unparseable image names")
-        df = df[~bad_rows].reset_index(drop=True)
-    df["patient_id"] = df["patient_id"].astype(int)
+    # For APTOS, patient_id won't have \d+_, so we just use the image ID
+    df["patient_id"] = df["patient_id"].fillna(df["image"])
+    df["patient_id"] = df["patient_id"].astype(str)
 
     # Worst diagnosis per patient for stratification
     patient_worst = (
@@ -122,15 +127,19 @@ def compute_class_weights(labels: np.ndarray) -> torch.Tensor:
     return torch.tensor(weights, dtype=torch.float32)
 
 
-def compute_sample_weights(labels: np.ndarray) -> np.ndarray:
+def compute_sample_weights(labels: np.ndarray, power: float = 0.5) -> np.ndarray:
     """
     Per-sample weights for WeightedRandomSampler.
 
-    Each sample gets a weight equal to the inverse frequency of its class,
-    so the sampler draws roughly equal numbers from every class per epoch.
+    Using power=0.5 applies square-root rebalancing by default (moderates
+    the effect on extremely rare classes to prevent over-duplication).
+    power=1.0 is full inverse frequency.
     """
+    if hasattr(config, "SAMPLER_POWER"):
+        power = config.SAMPLER_POWER
     class_counts = np.bincount(labels, minlength=config.NUM_CLASSES)
-    class_weights = 1.0 / np.maximum(class_counts, 1).astype(np.float64)
+    class_weights = (1.0 / np.maximum(class_counts, 1).astype(np.float64)) ** power
+    class_weights /= class_weights.sum()  # normalize
     sample_weights = class_weights[labels]
     return sample_weights
 
@@ -181,11 +190,15 @@ class DRDataset(Dataset):
     def _build_image_path_cache(self) -> dict[str, str]:
         """Resolve and cache image paths once to avoid per-item filesystem probing."""
         cache: dict[str, str] = {}
-        for img_id in self.image_ids:
+        for idx, row in self.df.iterrows():
+            img_id = row["image"]
+            source = row.get("source", "eyepacs")
             if img_id in cache:
                 continue
+                
+            search_dir = config.APTOS_IMAGES_DIR if source == "aptos" else self.images_dir
             for ext in _EXTENSIONS:
-                p = os.path.join(self.images_dir, img_id + ext)
+                p = os.path.join(search_dir, img_id + ext)
                 if os.path.isfile(p):
                     cache[img_id] = p
                     break
@@ -197,7 +210,7 @@ class DRDataset(Dataset):
         if p is not None:
             return p
         raise FileNotFoundError(
-            f"Image not found for '{img_id}' in {self.images_dir} (tried .jpeg/.jpg/.png/.webp)"
+            f"Image '{img_id}' not found. Please ensure it exists in the expected directory."
         )
 
     def __len__(self) -> int:
@@ -372,7 +385,7 @@ def preprocess_images_to_cache(
     cache_dir = cache_dir or os.path.join(config.DATA_DIR, f"preprocessed_{img_size}")
     os.makedirs(cache_dir, exist_ok=True)
 
-    unique_ids = pd.unique(df["image"])
+    unique_imgs = df.drop_duplicates(subset=["image"])
     cache_ext = f".{cache_image_format}"
     meta_path = os.path.join(cache_dir, "cache_meta.json")
 
@@ -383,7 +396,7 @@ def preprocess_images_to_cache(
         "source_images_dir": source_images_dir_abs,
         "cache_image_format": cache_image_format,
         "cache_image_quality": int(cache_image_quality),
-        "num_unique_images": int(len(unique_ids)),
+        "num_unique_images": int(len(unique_imgs)),
     }
 
     if os.path.isfile(meta_path):
@@ -407,15 +420,18 @@ def preprocess_images_to_cache(
     skipped = 0
     missing = 0
 
-    for img_id in unique_ids:
+    for _, row in unique_imgs.iterrows():
+        img_id = row["image"]
+        source = row.get("source", "eyepacs")
         out_path = os.path.join(cache_dir, f"{img_id}{cache_ext}")
         if os.path.isfile(out_path) and not overwrite:
             skipped += 1
             continue
 
         src_path = None
+        search_dir = config.APTOS_IMAGES_DIR if source == "aptos" else source_images_dir
         for ext in _EXTENSIONS:
-            candidate = os.path.join(source_images_dir, img_id + ext)
+            candidate = os.path.join(search_dir, img_id + ext)
             if os.path.isfile(candidate):
                 src_path = candidate
                 break

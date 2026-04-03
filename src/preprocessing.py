@@ -99,10 +99,10 @@ def apply_circular_mask(img: np.ndarray) -> np.ndarray:
 def preprocess_image(
     img: np.ndarray,
     img_size: int = config.IMG_SIZE,
-    use_ben_graham: bool = False,
+    use_ben_graham: bool = config.USE_BEN_GRAHAM,
     use_clahe: bool = True,
     use_crop: bool = True,
-    use_circular_mask: bool = False,
+    use_circular_mask: bool = config.USE_CIRCULAR_MASK,
 ) -> np.ndarray:
     """
     Full preprocessing pipeline for a single retinal image.

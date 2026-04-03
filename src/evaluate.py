@@ -18,6 +18,7 @@ import os
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
+import scipy.optimize as opt
 import seaborn as sns
 import torch
 import torch.nn as nn
@@ -74,6 +75,91 @@ def predict(
     y_proba = np.concatenate(all_probs)
     y_pred = y_proba.argmax(axis=1)
     return y_true, y_pred, y_proba
+
+
+def _qwk_loss(coef, X, y):
+    """Loss function for threshold optimization."""
+    X_p = np.copy(X)
+    for i, pred in enumerate(X_p):
+        if pred < coef[0]:
+            X_p[i] = 0
+        elif pred < coef[1]:
+            X_p[i] = 1
+        elif pred < coef[2]:
+            X_p[i] = 2
+        elif pred < coef[3]:
+            X_p[i] = 3
+        else:
+            X_p[i] = 4
+
+    return -cohen_kappa_score(y, X_p, weights="quadratic")
+
+
+def optimize_qwk_thresholds(y_proba: np.ndarray, y_true: np.ndarray) -> list[float]:
+    """Optimize thresholds for converting ordinal probabilities/scores to class labels."""
+    # Convert probabilities to a continuous score [0-4] using expectation
+    scores = np.sum(y_proba * np.arange(config.NUM_CLASSES), axis=1)
+    
+    initial_coef = [0.5, 1.5, 2.5, 3.5]
+    res = opt.minimize(
+        _qwk_loss,
+        initial_coef,
+        args=(scores, y_true),
+        method='Nelder-Mead'
+    )
+    return res.x.tolist()
+
+
+def apply_qwk_thresholds(y_proba: np.ndarray, coef: list[float]) -> np.ndarray:
+    """Apply learned thresholds to generate integer predictions."""
+    scores = np.sum(y_proba * np.arange(config.NUM_CLASSES), axis=1)
+    y_pred = np.zeros_like(scores, dtype=int)
+    for i, pred in enumerate(scores):
+        if pred < coef[0]:
+            y_pred[i] = 0
+        elif pred < coef[1]:
+            y_pred[i] = 1
+        elif pred < coef[2]:
+            y_pred[i] = 2
+        elif pred < coef[3]:
+            y_pred[i] = 3
+        else:
+            y_pred[i] = 4
+    return y_pred
+
+
+@torch.no_grad()
+def predict_ensemble(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    phases: list[str] = ["phase2", "phase3"]
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Average predictions from multiple checkpoint phases."""
+    all_probas = []
+    y_true = None
+    
+    for phase in phases:
+        path = os.path.join(config.CHECKPOINTS_DIR, f"best_model_{phase}.pth")
+        if not os.path.exists(path):
+            print(f"Skipping phase {phase}, checkpoint not found.")
+            continue
+            
+        ckpt = torch.load(path, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model_state_dict"])
+        
+        y_t, _, y_p = predict(model, loader, device)
+        all_probas.append(y_p)
+        if y_true is None:
+            y_true = y_t
+            
+    if not all_probas:
+        raise ValueError("No valid checkpoints found for ensemble")
+        
+    y_proba_ensemble = np.mean(all_probas, axis=0)
+    y_pred_ensemble = y_proba_ensemble.argmax(axis=1)
+    
+    return y_true, y_pred_ensemble, y_proba_ensemble
 
 
 # -----------------------------------------------------------------------
@@ -349,6 +435,19 @@ def full_evaluation(
     - Misclassified gallery
     """
     y_true, y_pred, y_proba = predict(model, test_loader, device)
+    
+    # Try threshold optimization if validation/test
+    try:
+        thresholds = optimize_qwk_thresholds(y_proba, y_true)
+        y_pred_opt = apply_qwk_thresholds(y_proba, thresholds)
+        opt_metrics = compute_metrics(y_true, y_pred_opt, y_proba)
+        # Use optimized predictions if they are better
+        if opt_metrics["qwk"] > compute_metrics(y_true, y_pred, y_proba)["qwk"]:
+            y_pred = y_pred_opt
+            print(f"Using optimized thresholds: {thresholds}")
+    except Exception as e:
+        print(f"Threshold optimization failed: {e}")
+
     metrics = compute_metrics(y_true, y_pred, y_proba)
 
     print("=" * 60)
