@@ -84,14 +84,14 @@ PHASE1_WEIGHT_DECAY = 1e-4
 PHASE1_BATCH_SIZE = 32
 
 # ---------------------------------------------------------------------------
-# Training — Phase 2 (partial unfreeze: features[-2:])
+# Training — Phase 2 (partial unfreeze: last two timm blocks, see PHASE2_UNFREEZE_FROM)
 # ---------------------------------------------------------------------------
 PHASE2_EPOCHS = 15
 PHASE2_LR = 5e-5
 PHASE2_WEIGHT_DECAY = 1e-4
 PHASE2_BATCH_SIZE = 32
 PHASE2_WARMUP_EPOCHS = 2
-PHASE2_UNFREEZE_FROM = "features[-2:]"
+PHASE2_UNFREEZE_FROM = "blocks[-2:]"  # timm EfficientNet uses blocks.N, not features.N
 
 # ---------------------------------------------------------------------------
 # Training — Phase 3 (full unfreeze)

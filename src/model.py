@@ -9,6 +9,7 @@ Architecture choices targeting high accuracy on DR grading:
 """
 
 import logging
+import re
 
 import timm
 import torch
@@ -17,6 +18,27 @@ import torch.nn as nn
 from . import config
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_backbone_block_slice(slice_str: str) -> slice:
+    """
+    Parse slice notation inside ``blocks[...]`` or ``features[...]``.
+
+    Supports comma-separated (``-2, None``) and colon forms (``-2:``, ``:3``, ``3:5``).
+    """
+    s = slice_str.strip()
+    if not s:
+        return slice(None)
+    if "," in s:
+        parts = [p.strip() for p in s.split(",")]
+        args = [int(p) if p else None for p in parts]
+        return slice(*args)
+    if ":" in s:
+        start_s, _, stop_s = s.partition(":")
+        start = int(start_s) if start_s.strip() else None
+        stop = int(stop_s) if stop_s.strip() else None
+        return slice(start, stop)
+    return slice(int(s))
 
 
 class DRModel(nn.Module):
@@ -94,7 +116,8 @@ def unfreeze_backbone(model: DRModel, from_block: str | None = None) -> None:
     Supports multiple formats:
     - None — full unfreeze of all backbone layers
     - "block5" — traditional EfficientNet block name (blocks.5 in timm)
-    - "features[-2:]" — unfreeze last 2 feature blocks (e.g., for 8-block model, unfreeze blocks 6+7)
+    - "blocks[-2:]" — unfreeze last N block indices (timm EfficientNet uses ``blocks.N``)
+    - "features[-2:]" — same for ResNet-style backbones that use ``features.N``
     - Direct layer name from named_parameters()
 
     All BatchNorm layers in the backbone are kept frozen regardless — this is
@@ -112,37 +135,33 @@ def unfreeze_backbone(model: DRModel, from_block: str | None = None) -> None:
     found = False
     candidate_prefixes: list[str] = []
 
-    # Parse "features[-2:]" syntax to unfreeze last N blocks
-    if isinstance(from_block, str) and "features[" in from_block and "]" in from_block:
+    # Parse "blocks[-2:]" or "features[-2:]" to unfreeze last N backbone stages
+    block_slice_match = (
+        re.search(r"(blocks|features)\[(.*?)\]", from_block)
+        if isinstance(from_block, str)
+        else None
+    )
+    if block_slice_match:
         try:
-            # Extract slice notation (e.g., "-2:" from "features[-2:]")
-            import re
+            block_prefix = block_slice_match.group(1)
+            slice_inner = block_slice_match.group(2)
+            block_indices: set[int] = set()
+            pat = re.compile(rf"{re.escape(block_prefix)}\.(\d+)")
+            for name, _ in model.backbone.named_parameters():
+                bm = pat.search(name)
+                if bm:
+                    block_indices.add(int(bm.group(1)))
 
-            match = re.search(r"features\[(.*?)\]", from_block)
-            if match:
-                slice_str = match.group(1)
-                # Get all feature blocks and apply slice
-                all_params = list(model.backbone.named_parameters())
-                # Find feature block indices
-                feature_indices = set()
-                for name, _ in all_params:
-                    feat_match = re.search(r"features\.(\d+)", name)
-                    if feat_match:
-                        feature_indices.add(int(feat_match.group(1)))
-
-                if feature_indices:
-                    # Convert to sorted list and apply slice
-                    sorted_indices = sorted(feature_indices)
-                    parts = slice_str.split(",")
-                    args = [int(p.strip()) if p.strip() else None for p in parts]
-                    slice_obj = slice(*args)
-                    unfrozen_indices = sorted_indices[slice_obj]
-
-                    # Build candidate prefixes for unfrozen blocks
-                    for idx in unfrozen_indices:
-                        candidate_prefixes.append(f"features.{idx}")
-
-                    logger.info(f"Parsed '{from_block}' → unfrozen blocks: {unfrozen_indices}")
+            if block_indices:
+                sorted_indices = sorted(block_indices)
+                slice_obj = _parse_backbone_block_slice(slice_inner)
+                unfrozen = sorted_indices[slice_obj]
+                unfrozen_list = [unfrozen] if isinstance(unfrozen, int) else list(unfrozen)
+                for idx in unfrozen_list:
+                    candidate_prefixes.append(f"{block_prefix}.{idx}")
+                logger.info(
+                    f"Parsed '{from_block}' → unfrozen {block_prefix} indices: {unfrozen_list}"
+                )
         except Exception as e:
             logger.warning(
                 f"Failed to parse '{from_block}': {e}. Falling back to literal string match."
