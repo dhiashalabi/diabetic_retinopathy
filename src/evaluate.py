@@ -581,7 +581,7 @@ def predict_single_image(
 def predict_with_tta(
     model: nn.Module,
     dataset_df,
-    images_dir: str,
+    dataset_name: str,
     device: torch.device,
     img_size: int = config.IMG_SIZE,
     batch_size: int = 16,
@@ -603,7 +603,7 @@ def predict_with_tta(
     for tfm in tqdm(tta_transforms, desc="TTA transforms"):
         ds = DRDataset(
             dataset_df,
-            images_dir=images_dir,
+            dataset_name=dataset_name,
             transform=tfm,
             preprocessing=True,
             img_size=img_size,
