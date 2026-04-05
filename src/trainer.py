@@ -23,7 +23,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from . import config
-from .augmentations import mixup_data, mixup_data_class_conditional, consistency_augment
+from .augmentations import consistency_augment, mixup_data, mixup_data_class_conditional
 from .losses import CombinedLoss, FocalLoss, LabelSmoothingCrossEntropy, OrdinalCrossEntropy
 from .utils import get_logger
 
@@ -125,11 +125,12 @@ class Trainer:
     Features:
     - Mixed-precision training (AMP)
     - Gradient clipping for stable fine-tuning
-    - Ordinal-aware or label-smoothed cross-entropy loss
+    - Combined Ordinal + Focal loss
     - Optional Mixup augmentation (Phase 2/3)
+    - Optional EMA (Exponential Moving Average)
     - Checkpointing on QWK (the clinical gold-standard metric)
     - Cosine LR with warmup
-    - Phase-aware data loaders (light augmentation for Phase 1)
+    - Discriminative learning rates (head vs backbone)
     """
 
     def __init__(
@@ -137,10 +138,18 @@ class Trainer:
         model: nn.Module,
         device: torch.device,
         class_weights: torch.Tensor | None = None,
+        ema=None,
     ):
         self.model = model.to(device)
         self.device = device
-        self.class_weights = class_weights if config.USE_CLASS_WEIGHTED_LOSS else None
+        self.ema = ema
+
+        # Class weights for loss function
+        if config.USE_CLASS_WEIGHTED_LOSS and class_weights is not None:
+            self.class_weights = class_weights
+        else:
+            self.class_weights = None
+
         self.scaler = GradScaler(device.type, enabled=device.type == "cuda")
         self.history: dict[str, list] = {
             "train_loss": [],
@@ -153,27 +162,32 @@ class Trainer:
         }
         self.best_kappa = -1.0
 
-    def _build_criterion(self) -> nn.Module:
-        if config.USE_ORDINAL_LOSS and getattr(config, "USE_FOCAL_LOSS", False):
+    def _build_criterion(self, reduction: str = "mean") -> nn.Module:
+        """Build the loss function based on config flags."""
+        if config.USE_ORDINAL_LOSS and config.USE_FOCAL_LOSS:
             return CombinedLoss(
                 class_weights=self.class_weights,
                 smoothing=config.LABEL_SMOOTHING,
-                focal_gamma=getattr(config, "FOCAL_GAMMA", 2.0),
+                focal_gamma=config.FOCAL_GAMMA,
+                reduction=reduction,
             )
         elif config.USE_ORDINAL_LOSS:
             return OrdinalCrossEntropy(
                 weight=self.class_weights,
                 smoothing=config.LABEL_SMOOTHING,
+                reduction=reduction,
             )
-        elif getattr(config, "USE_FOCAL_LOSS", False):
+        elif config.USE_FOCAL_LOSS:
             return FocalLoss(
                 alpha=self.class_weights,
                 label_smoothing=config.LABEL_SMOOTHING,
-                gamma=getattr(config, "FOCAL_GAMMA", 2.0),
+                gamma=config.FOCAL_GAMMA,
+                reduction=reduction,
             )
         return LabelSmoothingCrossEntropy(
             weight=self.class_weights,
             smoothing=config.LABEL_SMOOTHING,
+            reduction=reduction,
         )
 
     def _freeze_backbone_bn(self):
@@ -190,6 +204,7 @@ class Trainer:
         loader: DataLoader,
         optimizer: torch.optim.Optimizer,
         criterion: nn.Module,
+        criterion_unreduced: nn.Module,
         use_mixup: bool = False,
         use_amp: bool = True,
     ) -> dict:
@@ -209,46 +224,48 @@ class Trainer:
             images = images.to(self.device, non_blocking=True)
             labels = labels.to(self.device, non_blocking=True)
 
-            apply_consistency = getattr(config, "USE_CONSISTENCY_REG", False) and not use_mixup
-            if apply_consistency:
-                aug_images = consistency_augment(images)
-                images = torch.cat([images, aug_images], dim=0)
+            # --- Consistency regularization (without doubling batch) ---
+            apply_consistency = config.USE_CONSISTENCY_REG and not use_mixup
+            consistency_loss = torch.tensor(0.0, device=self.device)
 
+            # --- Mixup ---
             if use_mixup and config.USE_MIXUP:
-                if getattr(config, "USE_CLASS_CONDITIONAL_MIXUP", False):
+                if config.USE_CLASS_CONDITIONAL_MIXUP:
                     images, labels_a, labels_b, lam = mixup_data_class_conditional(images, labels)
                 else:
                     images, labels_a, labels_b, lam = mixup_data(images, labels)
+                use_mixup_this_batch = True
             else:
                 labels_a = labels_b = labels
                 lam = 1.0
+                use_mixup_this_batch = False
 
             optimizer.zero_grad(set_to_none=True)
 
             with autocast("cuda", enabled=amp_on):
                 outputs = self.model(images)
-                if apply_consistency:
-                    out_clean, out_aug = torch.chunk(outputs, 2, dim=0)
-                    loss_a = criterion(out_clean, labels_a)
-                    loss = loss_a.mean() if loss_a.dim() > 0 else loss_a
-                    # KL divergence for consistency
-                    log_prob_aug = F.log_softmax(out_aug, dim=1)
-                    prob_clean = F.softmax(out_clean.detach(), dim=1)
-                    kl_loss = F.kl_div(log_prob_aug, prob_clean, reduction="batchmean")
-                    loss = loss + getattr(config, "CONSISTENCY_WEIGHT", 0.5) * kl_loss
-                    outputs = out_clean
-                elif isinstance(lam, torch.Tensor):
-                    # Assume criterion returns reduction="none" vectors
-                    loss_a = criterion(outputs, labels_a)
-                    loss_b = criterion(outputs, labels_b)
-                    loss = (lam * loss_a + (1 - lam) * loss_b).mean()
-                else:
-                    loss_a = criterion(outputs, labels_a)
-                    loss_b = criterion(outputs, labels_b)
-                    if getattr(loss_a, "dim", lambda: 0)() > 0:
+
+                # --- Loss computation (clean, no branching) ---
+                if use_mixup_this_batch:
+                    # Mixup: weighted sum of losses with per-sample reduction
+                    loss_a = criterion_unreduced(outputs, labels_a)
+                    loss_b = criterion_unreduced(outputs, labels_b)
+                    if isinstance(lam, torch.Tensor):
                         loss = (lam * loss_a + (1 - lam) * loss_b).mean()
                     else:
-                        loss = lam * loss_a + (1 - lam) * loss_b
+                        loss = (lam * loss_a + (1 - lam) * loss_b).mean()
+                else:
+                    loss = criterion(outputs, labels_a)
+
+                # --- Consistency regularization (memory-efficient) ---
+                if apply_consistency:
+                    with torch.no_grad():
+                        prob_clean = F.softmax(outputs.detach(), dim=1)
+                    aug_images = consistency_augment(images)
+                    out_aug = self.model(aug_images)
+                    log_prob_aug = F.log_softmax(out_aug, dim=1)
+                    consistency_loss = F.kl_div(log_prob_aug, prob_clean, reduction="batchmean")
+                    loss = loss + config.CONSISTENCY_WEIGHT * consistency_loss
 
             if not torch.isfinite(loss).all():
                 logger.warning(
@@ -275,6 +292,10 @@ class Trainer:
                     config.GRADIENT_CLIP_NORM,
                 )
                 optimizer.step()
+
+            # --- EMA update ---
+            if self.ema is not None:
+                self.ema.update(self.model)
 
             batch_size = labels_a.size(0)
             running_loss += loss.item() * batch_size
@@ -307,7 +328,9 @@ class Trainer:
         criterion: nn.Module,
         use_amp: bool = True,
     ) -> dict:
-        self.model.eval()
+        # Use EMA model for validation if available
+        eval_model = self.ema.shadow if self.ema is not None else self.model
+        eval_model.eval()
 
         amp_on = bool(use_amp and self.device.type == "cuda")
 
@@ -323,10 +346,8 @@ class Trainer:
             labels = labels.to(self.device, non_blocking=True)
 
             with autocast("cuda", enabled=amp_on):
-                outputs = self.model(images)
+                outputs = eval_model(images)
                 loss = criterion(outputs, labels)
-                if getattr(loss, "dim", lambda: 0)() > 0:
-                    loss = loss.mean()
 
             batch_size = labels.size(0)
             if not torch.isfinite(loss).all():
@@ -365,6 +386,8 @@ class Trainer:
             ckpt["optimizer_state_dict"] = optimizer.state_dict()
         if scaler is not None:
             ckpt["scaler_state_dict"] = scaler.state_dict()
+        if self.ema is not None:
+            ckpt["ema_state_dict"] = self.ema.state_dict()
         torch.save(ckpt, path)
         logger.info(f"Checkpoint saved: {path} (QWK={metrics['kappa']:.4f})")
 
@@ -387,24 +410,21 @@ class Trainer:
         """
         self.best_kappa = -1.0
 
-        criterion = self._build_criterion().to(self.device)
+        # Build two versions of the criterion: reduced (scalar) and unreduced (per-sample)
+        criterion = self._build_criterion(reduction="mean").to(self.device)
+        criterion_unreduced = self._build_criterion(reduction="none").to(self.device)
 
-        if getattr(config, "USE_DISCRIMINATIVE_LR", False) and phase != "phase1":
-            # head gets higher LR, backbone gets base LR
-            head_params = []
-            backbone_params = []
-            for name, param in self.model.named_parameters():
-                if not param.requires_grad:
-                    continue
-                if "head" in name or "global_pool" in name:
-                    head_params.append(param)
-                else:
-                    backbone_params.append(param)
-            
+        # Discriminative learning rates
+        if config.USE_DISCRIMINATIVE_LR and phase != "phase1" and phase != "s1_phase1":
+            head_params = list(self.model.head.parameters()) + list(
+                self.model.global_pool.parameters()
+            )
+            backbone_params = [p for p in self.model.backbone.parameters() if p.requires_grad]
+
             optimizer = torch.optim.AdamW(
                 [
                     {"params": backbone_params, "lr": lr},
-                    {"params": head_params, "lr": lr * getattr(config, "HEAD_LR_MULTIPLIER", 10.0)},
+                    {"params": head_params, "lr": lr * config.HEAD_LR_MULTIPLIER},
                 ],
                 weight_decay=weight_decay,
             )
@@ -444,6 +464,7 @@ class Trainer:
                 train_loader,
                 optimizer,
                 criterion,
+                criterion_unreduced,
                 use_mixup=use_mixup,
                 use_amp=use_amp,
             )
@@ -484,8 +505,6 @@ class Trainer:
 
         return not early_stopped
 
-
-
     def load_best_checkpoint(self, phase: str = "phase3"):
         """Load the best checkpoint for evaluation / inference."""
         path = os.path.join(
@@ -497,7 +516,18 @@ class Trainer:
             return
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
         self.model.load_state_dict(ckpt["model_state_dict"])
+        if self.ema is not None and "ema_state_dict" in ckpt:
+            self.ema.load_state_dict(ckpt["ema_state_dict"])
         logger.info(
             f"Loaded checkpoint: {path} "
             f"(epoch {ckpt['epoch'] + 1}, QWK={ckpt['metrics']['kappa']:.4f})"
         )
+
+    def save_history(self, path: str | None = None):
+        """Save training history to JSON."""
+        if path is None:
+            path = os.path.join(config.LOGS_DIR, "training_history.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(self.history, f, indent=2)
+        logger.info(f"Training history saved to {path}")

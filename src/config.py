@@ -1,5 +1,10 @@
 """
 Central configuration for the Diabetic Retinopathy detection project.
+
+Two-stage transfer learning pipeline:
+  Stage 1 — Pre-train EfficientNetV2-S on EyePACS (~35K images, noisy labels)
+  Stage 2 — Fine-tune on APTOS 2019 (~3.6K images, clean labels)
+
 All hyperparameters, paths, and constants are defined here.
 """
 
@@ -10,6 +15,7 @@ import os
 # ---------------------------------------------------------------------------
 try:
     from google.colab import drive  # noqa: F401
+
     IS_COLAB = True
 except ImportError:
     IS_COLAB = False
@@ -21,18 +27,22 @@ if IS_COLAB:
     PROJECT_ROOT = "/content/drive/MyDrive/diabetic_retinopathy"
     _LOCAL_DATA = "/content/dataset"
     DATA_DIR = _LOCAL_DATA if os.path.isdir(_LOCAL_DATA) else os.path.join(PROJECT_ROOT, "dataset")
+    _LOCAL_APTOS = "/content/dataset_aptos"
+    APTOS_DATA_DIR = (
+        _LOCAL_APTOS if os.path.isdir(_LOCAL_APTOS) else os.path.join(PROJECT_ROOT, "dataset_aptos")
+    )
 else:
     PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     DATA_DIR = os.path.join(PROJECT_ROOT, "dataset")
+    APTOS_DATA_DIR = os.path.join(PROJECT_ROOT, "dataset_aptos")
 
-# EyePACS structure
+# EyePACS structure (handles nested Kaggle zip extraction)
 _images_candidate = os.path.join(DATA_DIR, "resized_train_cropped")
 _images_nested = os.path.join(_images_candidate, "resized_train_cropped")
 EYEPACS_IMAGES_DIR = _images_nested if os.path.isdir(_images_nested) else _images_candidate
 EYEPACS_LABELS_CSV = os.path.join(DATA_DIR, "trainLabels_cropped.csv")
 
 # APTOS structure
-APTOS_DATA_DIR = os.path.join(PROJECT_ROOT, "dataset_aptos")
 APTOS_IMAGES_DIR = os.path.join(APTOS_DATA_DIR, "train_images")
 APTOS_LABELS_CSV = os.path.join(APTOS_DATA_DIR, "train.csv")
 
@@ -68,58 +78,92 @@ VALID_RATIO = 0.15
 TEST_RATIO = 0.15
 
 # ---------------------------------------------------------------------------
-# TRANSFER LEARNING - STAGE 1 (EyePACS Pre-training)
+# Preprocessing cache
 # ---------------------------------------------------------------------------
-# We train progressively to handle the massive volume and noise.
-STAGE1_PHASE1_EPOCHS = 10
+USE_PREPROCESSED_CACHE = True
+PREPROCESSING_CACHE_VERSION = "v6"
+CACHE_IMAGE_FORMAT = "png"
+CACHE_IMAGE_QUALITY = 95
+CACHE_PNG_COMPRESSION = 3
+CACHE_FAIL_ON_MISSING = False  # Graceful degradation during download
+
+# ---------------------------------------------------------------------------
+# TRANSFER LEARNING — STAGE 1 (EyePACS pre-training)
+# ---------------------------------------------------------------------------
+# Three-phase progressive unfreezing on the noisy, massive dataset.
+STAGE1_PHASE1_EPOCHS = 8
 STAGE1_PHASE1_LR = 1e-3
 STAGE1_PHASE1_WD = 1e-4
 
-STAGE1_PHASE2_EPOCHS = 15
-STAGE1_PHASE2_LR = 1e-4
+STAGE1_PHASE2_EPOCHS = 12
+STAGE1_PHASE2_LR = 5e-5
 STAGE1_PHASE2_WD = 1e-4
-STAGE1_PHASE2_UNFREEZE = "blocks[-2:]"
+STAGE1_PHASE2_UNFREEZE = "blocks[-1:]"
 
-STAGE1_PHASE3_EPOCHS = 20
+STAGE1_PHASE3_EPOCHS = 15
 STAGE1_PHASE3_LR = 1e-5
 STAGE1_PHASE3_WD = 5e-4
-STAGE1_BATCH_SIZE = 16
+
+STAGE1_BATCH_SIZE = 48  # H100 85GB VRAM can handle 48-64 at 384×384
+
+# Backward-compatible aliases (used by evaluate.py training curve markers)
+PHASE1_EPOCHS = STAGE1_PHASE1_EPOCHS
+PHASE2_EPOCHS = STAGE1_PHASE2_EPOCHS
 
 # ---------------------------------------------------------------------------
-# TRANSFER LEARNING - STAGE 2 (APTOS Fine-tuning)
+# TRANSFER LEARNING — STAGE 2 (APTOS fine-tuning)
 # ---------------------------------------------------------------------------
-# Tiny, highly accurate dataset. Very low LR, single phase full unfreeze.
+# Small, clean dataset. Very low LR, single-phase full unfreeze.
 STAGE2_EPOCHS = 25
-STAGE2_LR = 1e-5           # Extremely low learning rate to not destroy Stage 1 features
-STAGE2_WEIGHT_DECAY = 1e-3 # Strong regularization
-STAGE2_BATCH_SIZE = 16
+STAGE2_LR = 1e-5
+STAGE2_WEIGHT_DECAY = 1e-3
+STAGE2_BATCH_SIZE = 32  # Smaller for fine-tuning stability
 STAGE2_WARMUP_EPOCHS = 3
 
 # ---------------------------------------------------------------------------
-# Shared Advanced Strategy (Applies to both)
+# Advanced training strategy
 # ---------------------------------------------------------------------------
 LABEL_SMOOTHING = 0.1
 DROPOUT_RATE = 0.4
 GRADIENT_CLIP_NORM = 1.0
 EARLY_STOPPING_PATIENCE = 7
 
+# Discriminative learning rates
 USE_DISCRIMINATIVE_LR = True
 HEAD_LR_MULTIPLIER = 10.0
 
+# Class balancing
 USE_WEIGHTED_SAMPLER = True
-SAMPLER_POWER = 0.5  # Square-root rebalancing
+SAMPLER_POWER = 0.5  # Square-root rebalancing: weight = 1/count^power
+USE_CLASS_WEIGHTED_LOSS = True  # Apply class weights to loss function
 
+# Loss configuration
 USE_ORDINAL_LOSS = True
 USE_FOCAL_LOSS = True
 FOCAL_GAMMA = 2.0
 
+# Mixup
 USE_MIXUP = True
 MIXUP_ALPHA = 0.4
 USE_CLASS_CONDITIONAL_MIXUP = True
-MIXUP_SKIP_CLASSES = [3, 4]
+MIXUP_SKIP_CLASSES = [3, 4]  # Don't mix Severe/Proliferative
 
+# Consistency regularization
 USE_CONSISTENCY_REG = True
 CONSISTENCY_WEIGHT = 0.5
+
+# Exponential Moving Average
+USE_EMA = True
+EMA_DECAY = 0.9999
+
+# ---------------------------------------------------------------------------
+# Model comparison (notebook 06)
+# ---------------------------------------------------------------------------
+COMPARISON_MODELS = {
+    "EfficientNetV2-S": "tf_efficientnetv2_s.in21k_ft_in1k",
+    "ConvNeXt-Base": "convnext_base.fb_in22k_ft_in1k",
+    "EfficientNetV2-M": "tf_efficientnetv2_m.in21k_ft_in1k",
+}
 
 # ---------------------------------------------------------------------------
 # System
@@ -133,11 +177,8 @@ else:
 PREFETCH_FACTOR = 4
 PIN_MEMORY = True
 
-PREPROCESSING_CACHE_VERSION = "v5" # Force rebuild for unmerged dataset structure
-CACHE_IMAGE_FORMAT = "png"
-CACHE_IMAGE_QUALITY = 95
-CACHE_PNG_COMPRESSION = 3
 
 def ensure_dirs():
+    """Create all required output directories."""
     for d in [DATA_DIR, APTOS_DATA_DIR, OUTPUTS_DIR, CHECKPOINTS_DIR, FIGURES_DIR, LOGS_DIR]:
         os.makedirs(d, exist_ok=True)

@@ -1,7 +1,7 @@
 [project]
 name = "diabetic-retinopathy"
-version = "0.1.0"
-description = "Diabetic Retinopathy detection from retinal fundus images using EfficientNet-B3"
+version = "2.0.0"
+description = "Diabetic Retinopathy detection from retinal fundus images using EfficientNetV2-S with two-stage transfer learning"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -17,6 +17,7 @@ dependencies = [
     "seaborn>=0.13",
     "tqdm>=4.67",
     "kaggle>=2.0",
+    "scipy>=1.17",
     "onnx>=1.20",
     "onnxruntime>=1.24",
 ]

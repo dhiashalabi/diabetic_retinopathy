@@ -32,7 +32,7 @@ def export_to_onnx(
     Parameters
     ----------
     checkpoint_path : str, optional
-        Path to the ``.pth`` checkpoint. Defaults to ``best_model_phase3.pth``.
+        Path to the ``.pth`` checkpoint. Defaults to ``best_model_aptos_finetune.pth``.
     output_path : str, optional
         Where to write the ``.onnx`` file. Defaults to ``CHECKPOINTS_DIR/model.onnx``.
     img_size : int
@@ -48,7 +48,7 @@ def export_to_onnx(
     if checkpoint_path is None:
         checkpoint_path = os.path.join(
             config.CHECKPOINTS_DIR,
-            "best_model_phase3.pth",
+            "best_model_aptos_finetune.pth",
         )
     if output_path is None:
         output_path = os.path.join(config.CHECKPOINTS_DIR, "model.onnx")

@@ -5,6 +5,7 @@ Implements:
 - Automatic fundus cropping (remove black borders)
 - CLAHE enhancement in LAB colour space
 - Ben Graham preprocessing (local colour subtraction)
+- Circular mask to remove edge artefacts
 """
 
 import cv2
@@ -20,6 +21,9 @@ def crop_fundus(img: np.ndarray, tolerance: int = 15) -> np.ndarray:
     Converts to grayscale, thresholds to find the bright fundus region,
     and returns the tightly cropped bounding box.
     """
+    if img is None or img.size == 0:
+        return img
+
     gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
     _, mask = cv2.threshold(gray, tolerance, 255, cv2.THRESH_BINARY)
 
@@ -29,6 +33,10 @@ def crop_fundus(img: np.ndarray, tolerance: int = 15) -> np.ndarray:
 
     largest = max(contours, key=cv2.contourArea)
     x, y, w, h = cv2.boundingRect(largest)
+
+    # Minimal area check — avoid tiny crops from noise
+    if w * h < 100:
+        return img
 
     pad = 5
     x = max(0, x - pad)

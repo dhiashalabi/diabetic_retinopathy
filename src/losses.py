@@ -1,10 +1,15 @@
 """
 Loss functions for Diabetic Retinopathy classification.
 
+All losses support a ``reduction`` parameter:
+  - "mean" (default): returns scalar — standard for training
+  - "none": returns per-sample (B,) tensor — needed for Mixup
+
 Provides:
-- FocalLoss: down-weights easy examples, focuses on hard borderline cases
-- OrdinalCrossEntropy: ordinal-aware soft targets (moved from trainer.py)
-- CombinedLoss: weighted sum of OrdinalCE + FocalLoss
+  - FocalLoss: down-weights easy examples, focuses on hard borderline cases
+  - OrdinalCrossEntropy: ordinal-aware soft targets aligned with QWK metric
+  - LabelSmoothingCrossEntropy: standard CE with label smoothing
+  - CombinedLoss: weighted sum of OrdinalCE + FocalLoss
 """
 
 import torch
@@ -19,7 +24,7 @@ class FocalLoss(nn.Module):
     Focal Loss for multi-class classification.
 
     Down-weights well-classified examples (e.g. the overwhelming No_DR class)
-    and focuses learning on hard borderline cases (No_DR↔Mild, Moderate confusion).
+    and focuses learning on hard borderline cases (No_DR↔Mild confusion).
 
     FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
 
@@ -32,6 +37,8 @@ class FocalLoss(nn.Module):
         Per-class weights.  If None, all classes weighted equally.
     label_smoothing : float
         Standard label smoothing applied before focal weighting.
+    reduction : str
+        "mean" returns scalar, "none" returns per-sample tensor.
     """
 
     def __init__(
@@ -40,35 +47,36 @@ class FocalLoss(nn.Module):
         alpha: torch.Tensor | None = None,
         label_smoothing: float = config.LABEL_SMOOTHING,
         num_classes: int = config.NUM_CLASSES,
+        reduction: str = "mean",
     ):
         super().__init__()
         self.gamma = gamma
         self.label_smoothing = label_smoothing
         self.num_classes = num_classes
+        self.reduction = reduction
         if alpha is not None:
             self.register_buffer("alpha", alpha.float())
         else:
             self.alpha = None
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        # Apply label smoothing to targets
         ce_loss = F.cross_entropy(
-            pred, target,
+            pred,
+            target,
             reduction="none",
             label_smoothing=self.label_smoothing,
         )
 
-        # Focal modulation factor
-        pt = torch.exp(-ce_loss)  # p_t = probability of correct class
+        pt = torch.exp(-ce_loss)
         focal_weight = (1.0 - pt) ** self.gamma
-
         loss = focal_weight * ce_loss
 
-        # Apply per-class alpha weights if provided
         if self.alpha is not None:
             alpha_t = self.alpha.to(pred.device)[target]
             loss = alpha_t * loss
 
+        if self.reduction == "mean":
+            return loss.mean()
         return loss
 
 
@@ -90,6 +98,8 @@ class OrdinalCrossEntropy(nn.Module):
         according to ordinal distance).
     weight : torch.Tensor or None
         Per-class weights for rebalancing.
+    reduction : str
+        "mean" returns scalar, "none" returns per-sample tensor.
     """
 
     def __init__(
@@ -97,11 +107,13 @@ class OrdinalCrossEntropy(nn.Module):
         num_classes: int = config.NUM_CLASSES,
         smoothing: float = config.LABEL_SMOOTHING,
         weight: torch.Tensor | None = None,
+        reduction: str = "mean",
     ):
         super().__init__()
         self.num_classes = num_classes
         self.smoothing = smoothing
         self.weight = weight
+        self.reduction = reduction
 
         soft_targets = self._build_soft_targets(num_classes, smoothing)
         self.register_buffer("soft_targets", soft_targets)
@@ -141,6 +153,8 @@ class OrdinalCrossEntropy(nn.Module):
             sample_w = w[target]
             per_sample_loss = per_sample_loss * sample_w
 
+        if self.reduction == "mean":
+            return per_sample_loss.mean()
         return per_sample_loss
 
 
@@ -154,11 +168,13 @@ class LabelSmoothingCrossEntropy(nn.Module):
         num_classes: int = config.NUM_CLASSES,
         smoothing: float = config.LABEL_SMOOTHING,
         weight: torch.Tensor | None = None,
+        reduction: str = "mean",
     ):
         super().__init__()
         self.smoothing = smoothing
         self.num_classes = num_classes
         self.weight = weight
+        self.reduction = reduction
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         weight = self.weight.to(pred.device) if self.weight is not None else None
@@ -167,7 +183,7 @@ class LabelSmoothingCrossEntropy(nn.Module):
             target,
             weight=weight,
             label_smoothing=self.smoothing,
-            reduction="none",
+            reduction=self.reduction,
         )
 
 
@@ -186,6 +202,8 @@ class CombinedLoss(nn.Module):
         Weight for the ordinal CE loss term.
     focal_weight : float
         Weight for the focal loss term.
+    reduction : str
+        "mean" returns scalar, "none" returns per-sample tensor.
     """
 
     def __init__(
@@ -196,24 +214,33 @@ class CombinedLoss(nn.Module):
         class_weights: torch.Tensor | None = None,
         ordinal_weight: float = 0.5,
         focal_weight: float = 0.5,
+        reduction: str = "mean",
     ):
         super().__init__()
         self.ordinal_weight = ordinal_weight
         self.focal_weight = focal_weight
+        self.reduction = reduction
 
+        # Sub-losses always return per-sample tensors internally
         self.ordinal_loss = OrdinalCrossEntropy(
             num_classes=num_classes,
             smoothing=smoothing,
             weight=class_weights,
+            reduction="none",
         )
         self.focal_loss = FocalLoss(
             gamma=focal_gamma,
             alpha=class_weights,
             label_smoothing=smoothing,
             num_classes=num_classes,
+            reduction="none",
         )
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         loss_ord = self.ordinal_loss(pred, target)
         loss_focal = self.focal_loss(pred, target)
-        return self.ordinal_weight * loss_ord + self.focal_weight * loss_focal
+        combined = self.ordinal_weight * loss_ord + self.focal_weight * loss_focal
+
+        if self.reduction == "mean":
+            return combined.mean()
+        return combined

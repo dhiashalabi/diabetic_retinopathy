@@ -9,8 +9,10 @@ Architecture choices targeting high accuracy on DR grading:
 - Stochastic depth (drop-path) for regularisation
 - Three-phase training: head-only, partial unfreeze, full unfreeze
 - BatchNorm freezing during fine-tuning to preserve pretrained statistics
+- Exponential Moving Average (EMA) for stable fine-tuning
 """
 
+import copy
 import logging
 import re
 
@@ -42,12 +44,7 @@ class GeM(nn.Module):
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return (
-            x.clamp(min=self.eps)
-            .pow(self.p)
-            .mean(dim=[-2, -1])
-            .pow(1.0 / self.p)
-        )
+        return x.clamp(min=self.eps).pow(self.p).mean(dim=[-2, -1]).pow(1.0 / self.p)
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(p={self.p.item():.2f})"
@@ -117,10 +114,11 @@ class DRModel(nn.Module):
         self._init_head()
 
     def _init_head(self):
-        """Kaiming initialisation for linear layers in the head."""
+        """Proper initialisation for the classification head."""
         for m in self.head.modules():
             if isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+                # Use trunc_normal_ which works well with any activation
+                nn.init.trunc_normal_(m.weight, std=0.02)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
             elif isinstance(m, nn.BatchNorm1d):
@@ -136,6 +134,51 @@ class DRModel(nn.Module):
         """Extract feature vector before the classification head (for Grad-CAM)."""
         features = self.backbone(x)
         return self.global_pool(features)
+
+
+# -----------------------------------------------------------------------
+# Exponential Moving Average
+# -----------------------------------------------------------------------
+
+
+class ModelEMA:
+    """
+    Exponential Moving Average of model weights.
+
+    Maintains a shadow copy of the model whose weights are an exponentially
+    weighted average of the training weights.  The EMA model typically
+    generalises better than the raw trained model.
+
+    Usage:
+        ema = ModelEMA(model, decay=0.9999)
+        # During training:
+        ema.update(model)
+        # During evaluation:
+        ema.apply(model)  # swap weights for inference
+    """
+
+    def __init__(self, model: nn.Module, decay: float = config.EMA_DECAY):
+        self.decay = decay
+        self.shadow = copy.deepcopy(model)
+        self.shadow.eval()
+        for param in self.shadow.parameters():
+            param.requires_grad_(False)
+
+    @torch.no_grad()
+    def update(self, model: nn.Module):
+        """Update EMA weights with current model weights."""
+        for ema_p, model_p in zip(self.shadow.parameters(), model.parameters(), strict=True):
+            ema_p.data.mul_(self.decay).add_(model_p.data, alpha=1.0 - self.decay)
+
+    def apply(self, model: nn.Module):
+        """Copy EMA weights into the model (for evaluation/export)."""
+        model.load_state_dict(self.shadow.state_dict())
+
+    def state_dict(self) -> dict:
+        return self.shadow.state_dict()
+
+    def load_state_dict(self, state_dict: dict):
+        self.shadow.load_state_dict(state_dict)
 
 
 # -----------------------------------------------------------------------
@@ -187,7 +230,6 @@ def unfreeze_backbone(model: DRModel, from_block: str | None = None) -> None:
             block_prefix = block_slice_match.group(1)
             slice_inner = block_slice_match.group(2)
             block_indices: set[int] = set()
-            pat = re.compile(rf"{re.escape(block_prefix)}\.\d+")
 
             # Also try common EfficientNetV2 internal naming patterns
             alt_prefixes = [block_prefix]
@@ -209,9 +251,7 @@ def unfreeze_backbone(model: DRModel, from_block: str | None = None) -> None:
                 for prefix in alt_prefixes:
                     for idx in unfrozen_list:
                         candidate_prefixes.append(f"{prefix}.{idx}")
-                logger.info(
-                    f"Parsed '{from_block}' → unfrozen indices: {unfrozen_list}"
-                )
+                logger.info(f"Parsed '{from_block}' → unfrozen indices: {unfrozen_list}")
         except Exception as e:
             logger.warning(
                 f"Failed to parse '{from_block}': {e}. Falling back to literal string match."
@@ -278,6 +318,18 @@ def count_parameters(model: nn.Module) -> dict:
     }
 
 
-def build_model(pretrained: bool = True) -> DRModel:
-    """Convenience: build a fresh DRModel with default config."""
-    return DRModel(pretrained=pretrained)
+def build_model(
+    model_name: str = config.MODEL_NAME,
+    num_classes: int = config.NUM_CLASSES,
+    pretrained: bool = True,
+    drop_path_rate: float = config.STOCHASTIC_DEPTH_RATE,
+    dropout_rate: float = config.DROPOUT_RATE,
+) -> DRModel:
+    """Convenience: build a DRModel with configurable parameters."""
+    return DRModel(
+        model_name=model_name,
+        num_classes=num_classes,
+        pretrained=pretrained,
+        drop_path_rate=drop_path_rate,
+        dropout_rate=dropout_rate,
+    )

@@ -47,6 +47,10 @@ def get_light_train_transforms(img_size: int = config.IMG_SIZE) -> A.Compose:
     )
 
 
+# Backward-compatible alias (train_pipeline.py may import either name)
+get_train_transforms_light = get_light_train_transforms
+
+
 def get_train_transforms(img_size: int = config.IMG_SIZE) -> A.Compose:
     """
     Aggressive augmentation for Phase 2/3 fine-tuning.
@@ -149,14 +153,22 @@ def get_tta_transforms(img_size: int = config.IMG_SIZE) -> list[A.Compose]:
         A.Compose([A.Resize(img_size, img_size)] + base_norm),
         A.Compose([A.Resize(img_size, img_size), A.HorizontalFlip(p=1.0)] + base_norm),
         A.Compose([A.Resize(img_size, img_size), A.VerticalFlip(p=1.0)] + base_norm),
-        A.Compose([A.Resize(img_size, img_size), A.Rotate(limit=(90, 90), p=1.0, border_mode=0)] + base_norm),
-        A.Compose([A.Resize(img_size, img_size), A.Rotate(limit=(180, 180), p=1.0, border_mode=0)] + base_norm),
-        A.Compose([A.Resize(img_size, img_size), A.Rotate(limit=(270, 270), p=1.0, border_mode=0)] + base_norm),
-        A.Compose([
-            A.Resize(img_size, img_size),
-            A.HorizontalFlip(p=1.0),
-            A.VerticalFlip(p=1.0)
-        ] + base_norm),
+        A.Compose(
+            [A.Resize(img_size, img_size), A.Rotate(limit=(90, 90), p=1.0, border_mode=0)]
+            + base_norm
+        ),
+        A.Compose(
+            [A.Resize(img_size, img_size), A.Rotate(limit=(180, 180), p=1.0, border_mode=0)]
+            + base_norm
+        ),
+        A.Compose(
+            [A.Resize(img_size, img_size), A.Rotate(limit=(270, 270), p=1.0, border_mode=0)]
+            + base_norm
+        ),
+        A.Compose(
+            [A.Resize(img_size, img_size), A.HorizontalFlip(p=1.0), A.VerticalFlip(p=1.0)]
+            + base_norm
+        ),
     ]
 
 
@@ -188,12 +200,15 @@ def mixup_data_class_conditional(
     images: torch.Tensor,
     labels: torch.Tensor,
     alpha: float = config.MIXUP_ALPHA,
-    skip_classes: list[int] = config.MIXUP_SKIP_CLASSES,
+    skip_classes: list[int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, float | torch.Tensor]:
     """
     Apply Mixup but SKIP samples from rare/severe classes to avoid blurring
     subtle disease features that distinguish those grades.
     """
+    if skip_classes is None:
+        skip_classes = config.MIXUP_SKIP_CLASSES
+
     if alpha <= 0:
         return images, labels, labels, 1.0
 
@@ -206,11 +221,8 @@ def mixup_data_class_conditional(
     # Create a mask for samples that should NOT be mixed
     mask = torch.zeros(batch_size, dtype=torch.bool, device=images.device)
     for c in skip_classes:
-        mask |= (labels == c)
-    
-    # Also don't mix IF the source image we are mixing with is a skip class
-    for c in skip_classes:
-        mask |= (labels[index] == c)
+        mask |= labels == c
+        mask |= labels[index] == c
 
     # For masked samples, use original image and target
     mixed[mask] = images[mask]
@@ -225,17 +237,19 @@ def consistency_augment(images: torch.Tensor) -> torch.Tensor:
     Generate a weakly-augmented view of a batch directly on the GPU.
     Used for consistency regularization (KL-divergence penalty).
     Applies mild random crops and horizontal flips.
+
+    NOTE: Returns a new tensor, does NOT modify the input.
     """
-    b, c, h, w = images.shape
     aug_images = images.clone()
-    
+
     # Random Horizontal Flip (p=0.5)
+    b = images.shape[0]
     flip_mask = torch.rand(b, device=images.device) < 0.5
     if flip_mask.any():
         aug_images[flip_mask] = torch.flip(aug_images[flip_mask], [-1])
-    
+
     # Mild intensity shift
     noise = torch.randn_like(aug_images) * 0.05
     aug_images = aug_images + noise
-    
+
     return aug_images

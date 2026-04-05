@@ -1,6 +1,6 @@
 # Diabetic Retinopathy Detection using Deep Learning
 
-Automated detection and grading of Diabetic Retinopathy (DR) from retinal fundus images using EfficientNet-B3 with PyTorch.
+Automated detection and grading of Diabetic Retinopathy (DR) from retinal fundus images using EfficientNetV2-S with two-stage transfer learning in PyTorch.
 
 ## Problem
 
@@ -16,28 +16,31 @@ Diabetic Retinopathy is the leading cause of preventable blindness. Early detect
 
 ## Dataset
 
-- ~35,000 retinal fundus images from the [Kaggle Diabetic Retinopathy (resized)](https://www.kaggle.com/datasets/tanlikesmath/diabetic-retinopathy-resized) dataset
-- Two CSV label files: `trainLabels_cropped.csv` (primary, for cropped images) and `trainLabels.csv` (full set)
+- **Stage 1 (EyePACS)**: ~35,000 retinal fundus images from [Kaggle Diabetic Retinopathy (resized)](https://www.kaggle.com/datasets/tanlikesmath/diabetic-retinopathy-resized) — noisy labels, massive scale
+- **Stage 2 (APTOS 2019)**: ~3,600 images from [Kaggle APTOS 2019](https://www.kaggle.com/c/aptos2019-blindness-detection) — clean labels, high quality
 - **Severe class imbalance**: ~73% No DR, ~5% Mild, ~15% Moderate, ~2% Severe, ~5% Proliferative
 
 ## Key Design Decisions
 
 ### High Accuracy Strategies
-- **EfficientNet-B3** backbone (ImageNet pre-trained) with custom two-layer head
-- **Three-phase training**: head-only warm-up, partial backbone unfreeze, then full fine-tuning with cosine warmup
+- **EfficientNetV2-S** backbone (ImageNet-21K pre-trained) with GeM pooling and custom two-layer head
+- **Two-stage transfer learning**: pre-train on EyePACS (3-phase progressive unfreezing), fine-tune on APTOS
 - **CLAHE enhancement**: boosts local contrast to reveal microaneurysms and haemorrhages
-- **Ordinal cross-entropy loss**: distance-weighted soft targets aligned with QWK metric
-- **Test-Time Augmentation (TTA)**: average predictions over 4 geometric transforms
-- **Label smoothing** (0.05): prevents overconfident predictions
+- **Combined loss**: Ordinal cross-entropy + Focal loss (aligned with QWK, focuses on hard cases)
+- **Exponential Moving Average (EMA)**: stable model weights for better generalisation
+- **Test-Time Augmentation (TTA)**: average predictions over geometric transforms
+- **Label smoothing** (0.1): prevents overconfident predictions
 
 ### Professional Dataset Balancing
 - **Patient-level stratified splitting**: prevents data leakage (both eyes stay in the same split)
 - **WeightedRandomSampler**: produces balanced mini-batches despite 73%/5%/15%/2%/5% imbalance
-- **Mixup augmentation**: linear interpolation of training pairs for regularisation
+- **Class-conditional Mixup**: linear interpolation while protecting rare/severe class features
+- **Consistency regularisation**: KL-divergence between differently augmented views
 - **Phase-aware augmentation**: light transforms for head-only training, full augmentation for fine-tuning
 
 ### Clinical-Grade Evaluation
 - **Quadratic Weighted Kappa (QWK)**: primary metric, penalises distant misclassifications more heavily
+- **Threshold optimisation**: learn optimal thresholds on validation set for improved grading
 - **Per-class ROC curves** with AUC
 - **Grad-CAM explainability**: visual explanations for clinical trust
 
@@ -45,28 +48,33 @@ Diabetic Retinopathy is the leading cause of preventable blindness. Early detect
 
 ```
 diabetic_retinopathy/
-├── dataset/                           # CSV labels + image directories
+├── dataset/                           # EyePACS: CSV labels + image directories
 │   ├── trainLabels_cropped.csv        # Primary labels (cropped images)
 │   ├── trainLabels.csv                # Full labels
 │   └── resized_train_cropped/         # Cropped fundus images (gitignored)
+├── dataset_aptos/                     # APTOS 2019: CSV labels + images
+│   ├── train.csv                      # Labels (id_code, diagnosis)
+│   └── train_images/                  # Fundus images (gitignored)
 ├── notebooks/
-│   ├── 01_eda.ipynb                   # Exploratory data analysis
+│   ├── 01_eda.ipynb                   # Exploratory data analysis (EyePACS + APTOS)
 │   ├── 02_preprocessing.ipynb         # Preprocessing pipeline demo
-│   ├── 03_training.ipynb              # Model training (Phase 1 + 2 + 3)
-│   ├── 04_evaluation.ipynb            # Full evaluation suite
-│   ├── 05_gradcam.ipynb               # Grad-CAM explainability
-│   ├── 06_model_comparison.ipynb      # EfficientNet-B3 vs B4 vs ResNet-50
+│   ├── 03_training.ipynb              # Stage 1: EyePACS pre-training (3-phase)
+│   ├── 03b_aptos_finetuning.ipynb     # Stage 2: APTOS fine-tuning + threshold opt
+│   ├── 04_evaluation.ipynb            # Full evaluation suite + TTA + thresholds
+│   ├── 05_gradcam.ipynb               # Grad-CAM explainability (APTOS images)
+│   ├── 06_model_comparison.ipynb      # EfficientNetV2-S vs ConvNeXt-Base vs V2-M
 │   └── 07_demo.ipynb                  # Gradio web demo
 ├── src/
 │   ├── __init__.py                    # Package init
 │   ├── config.py                      # Hyperparameters and paths
-│   ├── utils.py                       # Seed, device, logging
-│   ├── preprocessing.py               # CLAHE, crop, optional Ben Graham
-│   ├── augmentations.py               # Albumentations pipelines
-│   ├── dataset.py                     # Dataset, splits, balancing
-│   ├── model.py                       # EfficientNet-B3 builder
-│   ├── trainer.py                     # Training engine with AMP + resume
-│   ├── evaluate.py                    # Metrics and visualisation
+│   ├── utils.py                       # Seed, device, logging, GPU monitoring
+│   ├── preprocessing.py               # CLAHE, crop, Ben Graham
+│   ├── augmentations.py               # Albumentations pipelines + Mixup
+│   ├── dataset.py                     # Dataset, splits, balancing, cache
+│   ├── losses.py                      # Ordinal CE, Focal, Combined loss
+│   ├── model.py                       # EfficientNetV2-S builder + EMA
+│   ├── trainer.py                     # Training engine with AMP + EMA
+│   ├── evaluate.py                    # Metrics, threshold opt, TTA
 │   ├── gradcam.py                     # Grad-CAM implementation
 │   ├── export.py                      # ONNX export for production
 │   ├── data_manager.py                # Unified dataset download/setup
@@ -77,6 +85,7 @@ diabetic_retinopathy/
 │   ├── checkpoints/                   # Model weights (.pth + .onnx)
 │   ├── figures/                       # Plots and visualisations
 │   └── logs/                          # Training history
+├── train_pipeline.py                  # Master 2-stage training script
 ├── pyproject.toml                     # Project metadata, deps, ruff config
 ├── .python-version                    # Python version pin
 ├── .gitignore
@@ -94,17 +103,16 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 # Install dependencies
 uv sync
 
-# Download dataset from Kaggle
-# Option A: Set env vars (recommended for servers)
+# Download datasets from Kaggle
 export KAGGLE_USERNAME=your_username
 export KAGGLE_KEY=your_api_key
 uv run scripts/download_data.py
 
-# Option B: Use ~/.kaggle/kaggle.json
-uv run scripts/download_data.py
+# Run the full training pipeline
+uv run python train_pipeline.py
 
-# Option C: Custom data directory
-uv run scripts/download_data.py --data-dir /data/dr_dataset
+# Or quick test (1-2 epochs per phase)
+uv run python train_pipeline.py --dry-run
 
 # Run notebooks
 uv run jupyter notebook notebooks/
@@ -115,6 +123,7 @@ uv run jupyter notebook notebooks/
 ```bash
 pip install -e .
 python scripts/download_data.py
+python train_pipeline.py
 jupyter notebook notebooks/
 ```
 
@@ -134,19 +143,28 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 export KAGGLE_USERNAME=xxx KAGGLE_KEY=yyy
 uv sync
 uv run scripts/download_data.py
-uv run jupyter notebook --ip 0.0.0.0 --port 8888 --no-browser
+uv run python train_pipeline.py
 ```
 
 ## Usage
 
-Run the notebooks in order:
+### Full Training Pipeline
 
-1. **`01_eda.ipynb`** — Explore the dataset, understand class distribution
+```bash
+python train_pipeline.py               # Full 2-stage pipeline
+python train_pipeline.py --dry-run     # Quick test (1-2 epochs)
+python train_pipeline.py --stage2-only # Skip Stage 1 (needs existing checkpoint)
+```
+
+### Notebooks (run in order)
+
+1. **`01_eda.ipynb`** — Explore both datasets (EyePACS + APTOS)
 2. **`02_preprocessing.ipynb`** — Visualise the preprocessing pipeline
-3. **`03_training.ipynb`** — Train the model (Phase 1 + 2 + 3), exports to ONNX
-4. **`04_evaluation.ipynb`** — Evaluate on the held-out test set
-5. **`05_gradcam.ipynb`** — Generate Grad-CAM explanations
-6. **`06_model_comparison.ipynb`** — Benchmark EfficientNet-B3 vs B4 vs ResNet-50
+3. **`03_training.ipynb`** — Stage 1: EyePACS pre-training (3-phase progressive unfreezing)
+3b. **`03b_aptos_finetuning.ipynb`** — Stage 2: APTOS fine-tuning + threshold optimization
+4. **`04_evaluation.ipynb`** — Full evaluation + TTA comparison + threshold optimization
+5. **`05_gradcam.ipynb`** — Grad-CAM explanations on APTOS images
+6. **`06_model_comparison.ipynb`** — Benchmark EfficientNetV2-S vs ConvNeXt-Base vs V2-M
 7. **`07_demo.ipynb`** — Launch the Gradio web demo
 
 ## Development
@@ -167,10 +185,11 @@ uv run ruff format src/
 ## Technology Stack
 
 - **PyTorch** — deep learning framework
-- **timm** — pretrained EfficientNet-B3
+- **timm** — pretrained EfficientNetV2-S / ConvNeXt-Base / V2-M
 - **Albumentations** — fast image augmentation
-- **OpenCV** — image preprocessing (CLAHE)
+- **OpenCV** — image preprocessing (CLAHE, Ben Graham)
 - **scikit-learn** — metrics, splitting, class weighting
+- **scipy** — threshold optimisation
 - **Matplotlib / Seaborn** — visualisation
 - **Gradio** — interactive web demo
 - **ONNX / ONNXRuntime** — production model export

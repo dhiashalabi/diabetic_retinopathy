@@ -5,6 +5,7 @@ from . import (
     dataset,
     evaluate,
     gradcam,
+    losses,
     model,
     preprocessing,
     trainer,

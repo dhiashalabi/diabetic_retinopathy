@@ -1,5 +1,5 @@
 """
-Utility helpers: reproducibility, device selection, logging.
+Utility helpers: reproducibility, device selection, logging, GPU monitoring.
 """
 
 import logging
@@ -25,17 +25,34 @@ def seed_everything(seed: int = config.SEED) -> None:
     torch.backends.cudnn.benchmark = True
 
 
+# Backward-compatible alias (train_pipeline.py imports set_seed)
+set_seed = seed_everything
+
+
 def get_device() -> torch.device:
     """Return the best available device (CUDA > CPU)."""
     if torch.cuda.is_available():
         device = torch.device("cuda")
         gpu_name = torch.cuda.get_device_name(0)
-        gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1e9
+        gpu_mem = torch.cuda.get_device_properties(0).total_mem / 1e9
         print(f"Using GPU: {gpu_name} ({gpu_mem:.1f} GB)")
     else:
         device = torch.device("cpu")
         print("Using CPU")
     return device
+
+
+def log_gpu_memory(prefix: str = "") -> None:
+    """Log current GPU memory usage (useful for batch-size tuning)."""
+    if not torch.cuda.is_available():
+        return
+    allocated = torch.cuda.memory_allocated() / 1e9
+    reserved = torch.cuda.memory_reserved() / 1e9
+    total = torch.cuda.get_device_properties(0).total_memory / 1e9
+    msg = f"GPU Memory — Allocated: {allocated:.2f}GB | Reserved: {reserved:.2f}GB | Total: {total:.1f}GB"
+    if prefix:
+        msg = f"{prefix} | {msg}"
+    print(msg)
 
 
 def get_logger(name: str, log_file: str | None = None) -> logging.Logger:

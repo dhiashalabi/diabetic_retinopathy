@@ -99,14 +99,9 @@ def optimize_qwk_thresholds(y_proba: np.ndarray, y_true: np.ndarray) -> list[flo
     """Optimize thresholds for converting ordinal probabilities/scores to class labels."""
     # Convert probabilities to a continuous score [0-4] using expectation
     scores = np.sum(y_proba * np.arange(config.NUM_CLASSES), axis=1)
-    
+
     initial_coef = [0.5, 1.5, 2.5, 3.5]
-    res = opt.minimize(
-        _qwk_loss,
-        initial_coef,
-        args=(scores, y_true),
-        method='Nelder-Mead'
-    )
+    res = opt.minimize(_qwk_loss, initial_coef, args=(scores, y_true), method="Nelder-Mead")
     return res.x.tolist()
 
 
@@ -133,32 +128,32 @@ def predict_ensemble(
     model: nn.Module,
     loader: DataLoader,
     device: torch.device,
-    phases: list[str] = ["phase2", "phase3"]
+    phases: list[str] = ["phase2", "phase3"],
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Average predictions from multiple checkpoint phases."""
     all_probas = []
     y_true = None
-    
+
     for phase in phases:
         path = os.path.join(config.CHECKPOINTS_DIR, f"best_model_{phase}.pth")
         if not os.path.exists(path):
             print(f"Skipping phase {phase}, checkpoint not found.")
             continue
-            
+
         ckpt = torch.load(path, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model_state_dict"])
-        
+
         y_t, _, y_p = predict(model, loader, device)
         all_probas.append(y_p)
         if y_true is None:
             y_true = y_t
-            
+
     if not all_probas:
         raise ValueError("No valid checkpoints found for ensemble")
-        
+
     y_proba_ensemble = np.mean(all_probas, axis=0)
     y_pred_ensemble = y_proba_ensemble.argmax(axis=1)
-    
+
     return y_true, y_pred_ensemble, y_proba_ensemble
 
 
@@ -293,8 +288,17 @@ def plot_roc_curves(
 def plot_training_curves(
     history: dict[str, list],
     save_path: str | None = None,
+    phase_boundaries: list[int] | None = None,
 ):
-    """Plot loss, accuracy, and QWK over training epochs."""
+    """
+    Plot loss, accuracy, and QWK over training epochs.
+
+    Parameters
+    ----------
+    phase_boundaries : list[int], optional
+        Epoch indices where training phases change.
+        Defaults to [PHASE1_EPOCHS, PHASE1_EPOCHS + PHASE2_EPOCHS].
+    """
     epochs = range(1, len(history["train_loss"]) + 1)
 
     fig, axes = plt.subplots(1, 3, figsize=(20, 5))
@@ -327,29 +331,28 @@ def plot_training_curves(
     axes[2].grid(True, alpha=0.3)
 
     # Mark phase boundaries
-    p1_end = config.PHASE1_EPOCHS
-    if p1_end < len(history["train_loss"]):
-        for ax in axes:
-            ax.axvline(
-                p1_end + 0.5,
-                color="grey",
-                ls="--",
-                alpha=0.6,
-                label="Partial unfreeze" if ax == axes[0] else None,
-            )
+    if phase_boundaries is None:
+        phase_boundaries = [
+            config.STAGE1_PHASE1_EPOCHS,
+            config.STAGE1_PHASE1_EPOCHS + config.STAGE1_PHASE2_EPOCHS,
+        ]
 
-    p2_end = config.PHASE1_EPOCHS + config.PHASE2_EPOCHS
-    if p2_end < len(history["train_loss"]):
-        for ax in axes:
-            ax.axvline(
-                p2_end + 0.5,
-                color="grey",
-                ls=":",
-                alpha=0.6,
-                label="Full unfreeze" if ax == axes[0] else None,
-            )
+    boundary_labels = ["Partial unfreeze", "Full unfreeze"]
+    boundary_styles = ["--", ":"]
+    for i, boundary in enumerate(phase_boundaries):
+        if boundary < len(history["train_loss"]):
+            label = boundary_labels[i] if i < len(boundary_labels) else f"Phase {i + 2}"
+            style = boundary_styles[i] if i < len(boundary_styles) else "--"
+            for ax in axes:
+                ax.axvline(
+                    boundary + 0.5,
+                    color="grey",
+                    ls=style,
+                    alpha=0.6,
+                    label=label if ax == axes[0] else None,
+                )
 
-    if p1_end < len(history["train_loss"]):
+    if phase_boundaries and phase_boundaries[0] < len(history["train_loss"]):
         axes[0].legend()
 
     plt.tight_layout()
@@ -435,7 +438,7 @@ def full_evaluation(
     - Misclassified gallery
     """
     y_true, y_pred, y_proba = predict(model, test_loader, device)
-    
+
     # Try threshold optimization if validation/test
     try:
         thresholds = optimize_qwk_thresholds(y_proba, y_true)
