@@ -6,6 +6,8 @@ regions most influential for each DR severity prediction — critical
 for clinical trust and model debugging.
 """
 
+import os
+
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
@@ -14,6 +16,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from . import config
+from .augmentations import get_valid_transforms
 
 
 class GradCAM:
@@ -201,7 +204,8 @@ def visualize_gradcam(
     # Get prediction
     model.eval()
     with torch.no_grad():
-        probs = torch.softmax(model(input_tensor), dim=1).cpu().numpy()[0]
+        logits = model(input_tensor)
+        probs = torch.softmax(logits.float(), dim=1).cpu().numpy()[0]
     pred_cls = probs.argmax()
     pred_name = class_names[pred_cls]
     confidence = probs[pred_cls]
@@ -314,4 +318,123 @@ def visualize_gradcam_grid(
     if save_path:
         fig.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.show()
+    return fig
+
+
+# -----------------------------------------------------------------------
+# Notebook-friendly API (used by ``05_gradcam.ipynb``)
+# -----------------------------------------------------------------------
+
+
+def _resolve_aptos_image_path(image_id: str, images_dir: str) -> str | None:
+    """Try preprocessed cache first, then ``images_dir``, with common extensions."""
+    cache_dir = os.path.join(config.APTOS_DATA_DIR, f"preprocessed_{config.IMG_SIZE}_aptos")
+    for base in (cache_dir, images_dir):
+        for ext in (".jpeg", ".jpg", ".png", ".JPEG", ".JPG"):
+            p = os.path.join(base, str(image_id) + ext)
+            if os.path.isfile(p):
+                return p
+    return None
+
+
+class GradCAMExplainer:
+    """
+    High-level wrapper: validation transforms + Grad-CAM for raw RGB uint8 images.
+
+    ``explain`` returns a heatmap at model input resolution, an overlay on the
+    full-resolution ``img_rgb``, the predicted class index, and a probability vector.
+    """
+
+    def __init__(
+        self,
+        model: nn.Module,
+        device: torch.device,
+        class_names: list[str] = config.CLASS_NAMES,
+        img_size: int = config.IMG_SIZE,
+    ):
+        self.model = model
+        self.device = device
+        self.class_names = class_names
+        self.img_size = img_size
+        self.target_layer = get_target_layer(model)
+        self._valid_tfm = get_valid_transforms(img_size)
+
+    def explain(
+        self,
+        img_rgb: np.ndarray,
+        target_class: int | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, int, np.ndarray]:
+        """
+        Returns
+        -------
+        heatmap : np.ndarray
+            2D array in [0, 1], shape (``img_size``, ``img_size``).
+        overlay : np.ndarray
+            RGB uint8, same height/width as ``img_rgb``.
+        pred_class : int
+            Argmax class index.
+        proba : np.ndarray
+            Shape (num_classes,), float32.
+        """
+        t = self._valid_tfm(image=img_rgb)["image"].unsqueeze(0).to(self.device)
+        cam = GradCAM(self.model, self.target_layer)
+        try:
+            heatmap = cam.generate_heatmap(t, target_class=target_class)
+            overlay = cam.overlay_heatmap(img_rgb, heatmap)
+        finally:
+            cam.remove_hooks()
+
+        self.model.eval()
+        with torch.no_grad():
+            logits = self.model(t)
+            proba = torch.softmax(logits.float(), dim=1).cpu().numpy()[0]
+        pred_class = int(proba.argmax())
+        return heatmap, overlay, pred_class, proba
+
+
+def generate_gradcam_grid(
+    explainer: GradCAMExplainer,
+    test_df,
+    images_dir: str,
+    n_per_class: int = 3,
+    class_names: list[str] = config.CLASS_NAMES,
+    save_path: str | None = None,
+):
+    """
+    Grid of Grad-CAM overlays: rows = DR class, columns = up to ``n_per_class`` examples.
+    Resolves file paths the same way as the Grad-CAM notebook (cache, then raw dir).
+    """
+    n_rows = config.NUM_CLASSES
+    n_cols = n_per_class
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 4 * n_rows))
+    if n_rows == 1:
+        axes = np.atleast_2d(axes)
+    fig.suptitle("Grad-CAM Explanations per DR Grade", fontsize=16, y=1.01)
+
+    for row in range(n_rows):
+        subset = test_df[test_df["level"] == row].head(n_per_class)
+        for col in range(n_cols):
+            ax = axes[row, col]
+            if col >= len(subset):
+                ax.axis("off")
+                continue
+            image_id = subset.iloc[col]["image"]
+            p = _resolve_aptos_image_path(image_id, images_dir)
+            if p is None:
+                ax.axis("off")
+                continue
+            bgr = cv2.imread(p)
+            if bgr is None:
+                ax.axis("off")
+                continue
+            img_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            _heatmap, overlay, _pred, _p = explainer.explain(img_rgb)
+            ax.imshow(overlay)
+            ax.set_title(class_names[row], fontsize=10, fontweight="bold")
+            ax.axis("off")
+
+    plt.tight_layout()
+    if save_path:
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        fig.savefig(save_path, dpi=200, bbox_inches="tight")
     return fig

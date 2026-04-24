@@ -653,10 +653,14 @@ def predict_with_tta(
     device: torch.device,
     img_size: int = config.IMG_SIZE,
     batch_size: int = 32,
+    max_tta_views: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Predict with Test-Time Augmentation by averaging softmax probabilities
     across multiple geometric transforms.
+
+    ``max_tta_views`` — if set, use only the first N transforms from
+    ``get_tta_transforms`` (e.g. 4 for a faster TTA ablation).
 
     Returns (y_true, y_pred, y_proba).
     """
@@ -664,6 +668,8 @@ def predict_with_tta(
 
     model.eval()
     tta_transforms = get_tta_transforms(img_size)
+    if max_tta_views is not None:
+        tta_transforms = tta_transforms[:max_tta_views]
 
     all_probs_per_tta = []
     y_true = None
