@@ -52,6 +52,11 @@ def _eval_autocast(device: torch.device):
     return contextlib.nullcontext()
 
 
+def _softmax_probs_numpy(logits: torch.Tensor) -> np.ndarray:
+    """Softmax then float32 CPU numpy (NumPy does not support bfloat16)."""
+    return torch.softmax(logits, dim=1).float().cpu().numpy()
+
+
 # -----------------------------------------------------------------------
 # Prediction helpers
 # -----------------------------------------------------------------------
@@ -76,7 +81,7 @@ def predict(
         images = images.to(device, non_blocking=True)
         with _eval_autocast(device):
             logits = model(images)
-        probs = torch.softmax(logits, dim=1).cpu().numpy()
+        probs = _softmax_probs_numpy(logits)
         all_probs.append(probs)
         all_labels.append(labels.numpy())
 
@@ -591,7 +596,7 @@ def predict_single_image(
     with torch.no_grad():
         with _eval_autocast(device):
             logits = model(tensor)
-        probs = torch.softmax(logits, dim=1).cpu().numpy()[0]
+        probs = _softmax_probs_numpy(logits)[0]
 
     pred_idx = int(probs.argmax())
     pred_class = class_names[pred_idx]
@@ -685,7 +690,7 @@ def predict_with_tta(
             images = images.to(device, non_blocking=True)
             with _eval_autocast(device):
                 logits = model(images)
-            probs_list.append(torch.softmax(logits, dim=1).cpu().numpy())
+            probs_list.append(_softmax_probs_numpy(logits))
             labels_list.append(labels.numpy())
 
         all_probs_per_tta.append(np.concatenate(probs_list))
