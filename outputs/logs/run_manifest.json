@@ -5,6 +5,6 @@
   "MODEL_NAME": "tf_efficientnetv2_s.in21k_ft_in1k",
   "STAGE1_BATCH_SIZE": 96,
   "PREPROCESSING_CACHE_VERSION": "v7",
-  "_updated_at": "2026-04-24T06:06:29Z",
+  "_updated_at": "2026-04-24T06:26:50Z",
   "notebook_stage": "03b_aptos_start"
 }
