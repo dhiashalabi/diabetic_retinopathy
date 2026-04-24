@@ -2,9 +2,11 @@
 Utility helpers: reproducibility, device selection, logging, GPU monitoring.
 """
 
+import json
 import logging
 import os
 import random
+from datetime import datetime, timezone
 
 import numpy as np
 import torch
@@ -80,3 +82,31 @@ def get_logger(name: str, log_file: str | None = None) -> logging.Logger:
         logger.addHandler(fh)
 
     return logger
+
+
+def write_run_manifest(path: str, payload: dict, merge: bool = False) -> None:
+    """
+    Write a JSON run manifest (hyperparameters, stage markers, eval metrics).
+
+    When ``merge`` is True, shallow-merge ``payload`` into an existing JSON object
+    at ``path`` (non-dict existing content is replaced). Parent directories are created.
+    """
+    dir_name = os.path.dirname(path)
+    if dir_name:
+        os.makedirs(dir_name, exist_ok=True)
+
+    base: dict = {}
+    if merge and os.path.isfile(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                base = loaded
+        except (json.JSONDecodeError, OSError):
+            base = {}
+
+    merged = {**base, **payload}
+    merged["_updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(merged, f, indent=2)

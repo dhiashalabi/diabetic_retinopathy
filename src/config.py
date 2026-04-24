@@ -10,6 +10,8 @@ All hyperparameters, paths, and constants are defined here.
 
 import os
 
+import torch
+
 # ---------------------------------------------------------------------------
 # Environment detection
 # ---------------------------------------------------------------------------
@@ -50,6 +52,7 @@ OUTPUTS_DIR = os.path.join(PROJECT_ROOT, "outputs")
 CHECKPOINTS_DIR = os.path.join(OUTPUTS_DIR, "checkpoints")
 FIGURES_DIR = os.path.join(OUTPUTS_DIR, "figures")
 LOGS_DIR = os.path.join(OUTPUTS_DIR, "logs")
+RUN_MANIFEST_PATH = os.path.join(LOGS_DIR, "run_manifest.json")
 
 # ---------------------------------------------------------------------------
 # Class definitions
@@ -185,6 +188,28 @@ PIN_MEMORY = True
 
 # Optional: torch.compile on CUDA (Hopper H100/H200, Ada, Ampere+); first epoch may compile
 USE_TORCH_COMPILE = True
+
+# AMP: "bfloat16" on CUDA when supported (H200/Hopper; no GradScaler). Else float16 + GradScaler.
+# Override: DR_AMP_DTYPE=float16
+AMP_DTYPE = os.environ.get("DR_AMP_DTYPE", "bfloat16").lower()
+
+
+def resolve_amp(device: torch.device) -> tuple[torch.dtype | None, bool]:
+    """
+    Returns (autocast_dtype, use_grad_scaler).
+
+    CPU: (None, False). CUDA bf16 when supported: (bfloat16, False).
+    CUDA otherwise: (float16, True).
+    """
+    if device.type != "cuda":
+        return None, False
+    want_bf16 = AMP_DTYPE in ("bf16", "bfloat16")
+    want_fp16 = AMP_DTYPE in ("fp16", "float16")
+    if want_bf16 and torch.cuda.is_bf16_supported():
+        return torch.bfloat16, False
+    if want_fp16 or want_bf16:
+        return torch.float16, True
+    return torch.float16, True
 
 
 def ensure_dirs():

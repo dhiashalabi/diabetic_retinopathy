@@ -40,7 +40,7 @@ from src.model import (
     unfreeze_backbone,
 )
 from src.trainer import Trainer
-from src.utils import get_logger, log_gpu_memory, seed_everything
+from src.utils import get_logger, log_gpu_memory, seed_everything, write_run_manifest
 
 logger = get_logger(__name__)
 
@@ -68,6 +68,17 @@ def run_stage1_eyepacs(device, dry_run: bool = False):
     final_best_path = os.path.join(config.CHECKPOINTS_DIR, "best_eyepacs_model.pth")
     if os.path.exists(final_best_path) and not dry_run:
         logger.info(f"Stage 1 checkpoint already exists: {final_best_path}. Skipping Stage 1.")
+        write_run_manifest(
+            config.RUN_MANIFEST_PATH,
+            {
+                "stage": "eyepacs",
+                "stage1_skipped": True,
+                "checkpoint_stage1": final_best_path,
+                "AMP_DTYPE": config.AMP_DTYPE,
+                "MODEL_NAME": config.MODEL_NAME,
+            },
+            merge=True,
+        )
         return final_best_path
 
     # Load & split data
@@ -194,6 +205,19 @@ def run_stage1_eyepacs(device, dry_run: bool = False):
     trainer.save_history(os.path.join(config.LOGS_DIR, "stage1_history.json"))
 
     logger.info(f"Stage 1 Complete. Best model saved to {final_best_path}")
+    write_run_manifest(
+        config.RUN_MANIFEST_PATH,
+        {
+            "stage": "eyepacs",
+            "dry_run": dry_run,
+            "AMP_DTYPE": config.AMP_DTYPE,
+            "MODEL_NAME": config.MODEL_NAME,
+            "STAGE1_BATCH_SIZE": config.STAGE1_BATCH_SIZE,
+            "PREPROCESSING_CACHE_VERSION": config.PREPROCESSING_CACHE_VERSION,
+            "checkpoint_stage1": final_best_path,
+        },
+        merge=True,
+    )
     return final_best_path
 
 
@@ -202,6 +226,7 @@ def run_stage2_aptos(
     pretrained_weights_path: str | None,
     dry_run: bool = False,
     aptos_only: bool = False,
+    use_tta: bool = False,
 ):
     """Stage 2: Fine-tune on APTOS with single-phase full unfreeze."""
     logger.info("=" * 70)
@@ -288,18 +313,44 @@ def run_stage2_aptos(
     # Save training history
     trainer.save_history(os.path.join(config.LOGS_DIR, "stage2_history.json"))
 
+    aptos_ckpt = os.path.join(config.CHECKPOINTS_DIR, "best_model_aptos_finetune.pth")
+    write_run_manifest(
+        config.RUN_MANIFEST_PATH,
+        {
+            "stage_aptos_finetune": True,
+            "aptos_only": aptos_only,
+            "dry_run": dry_run,
+            "checkpoint_aptos": aptos_ckpt,
+            "STAGE2_BATCH_SIZE": config.STAGE2_BATCH_SIZE,
+            "AMP_DTYPE": config.AMP_DTYPE,
+        },
+        merge=True,
+    )
+
     logger.info("Stage 2 Complete. Running Final Evaluation...")
 
     # Final evaluation
     if test_df is not None and "test" in loaders:
         test_dataset = loaders["test"].dataset
-        metrics = full_evaluation(
-            trainer.model,
-            loaders["test"],
-            device,
-            test_dataset=test_dataset,
-            valid_loader=loaders["valid"],
-        )
+        if use_tta:
+            metrics = full_evaluation(
+                trainer.model,
+                loaders["test"],
+                device,
+                test_dataset=test_dataset,
+                use_tta=True,
+                valid_df=valid_df,
+                test_df=test_df,
+                dataset_name="aptos",
+            )
+        else:
+            metrics = full_evaluation(
+                trainer.model,
+                loaders["test"],
+                device,
+                test_dataset=test_dataset,
+                valid_loader=loaders["valid"],
+            )
 
         # Save metrics
         metrics_name = "aptos_only_metrics.json" if aptos_only else "final_aptos_metrics.json"
@@ -318,6 +369,20 @@ def run_stage2_aptos(
             json.dump(dump_metrics, f, indent=4)
         logger.info(f"Final metrics saved to {metrics_path}")
 
+        qwk_val = metrics.get("qwk")
+        write_run_manifest(
+            config.RUN_MANIFEST_PATH,
+            {
+                "evaluation_cli": {
+                    "qwk": float(qwk_val) if qwk_val is not None else None,
+                    "use_tta": use_tta,
+                    "metrics_path": metrics_path,
+                    "figures_dir": config.FIGURES_DIR,
+                },
+            },
+            merge=True,
+        )
+
         return metrics
 
     return None
@@ -335,6 +400,11 @@ def main():
         "--aptos-only",
         action="store_true",
         help="Skip Stage 1; fine-tune on APTOS from ImageNet weights only (ablation baseline)",
+    )
+    parser.add_argument(
+        "--tta",
+        action="store_true",
+        help="Final eval with test-time augmentation (val/test TTA + QWK thresholds on val TTA)",
     )
     args = parser.parse_args()
 
@@ -377,6 +447,7 @@ def main():
         best_eyepacs_weights,
         dry_run=args.dry_run,
         aptos_only=args.aptos_only,
+        use_tta=args.tta,
     )
 
     logger.info("=" * 70)

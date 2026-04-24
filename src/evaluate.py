@@ -13,6 +13,7 @@ Metrics:
 - Test-Time Augmentation (TTA)
 """
 
+import contextlib
 import os
 
 import cv2
@@ -43,6 +44,14 @@ from .preprocessing import preprocess_image
 PLOT_DPI = 300
 
 
+def _eval_autocast(device: torch.device):
+    """Match training AMP dtype (bf16 on Hopper when configured)."""
+    dt, _ = config.resolve_amp(device)
+    if device.type == "cuda" and dt is not None:
+        return autocast("cuda", dtype=dt, enabled=True)
+    return contextlib.nullcontext()
+
+
 # -----------------------------------------------------------------------
 # Prediction helpers
 # -----------------------------------------------------------------------
@@ -65,7 +74,7 @@ def predict(
 
     for images, labels in tqdm(loader, desc="Predicting", leave=False):
         images = images.to(device, non_blocking=True)
-        with autocast("cuda", enabled=device.type == "cuda"):
+        with _eval_autocast(device):
             logits = model(images)
         probs = torch.softmax(logits, dim=1).cpu().numpy()
         all_probs.append(probs)
@@ -423,42 +432,86 @@ def show_misclassified(
 
 def full_evaluation(
     model: nn.Module,
-    test_loader: DataLoader,
+    test_loader: DataLoader | None,
     device: torch.device,
     test_dataset=None,
     valid_loader: DataLoader | None = None,
     save_dir: str = config.FIGURES_DIR,
+    use_tta: bool = False,
+    valid_df=None,
+    test_df=None,
+    dataset_name: str = "aptos",
+    tta_batch_size: int | None = None,
 ):
     """
     Run the complete evaluation pipeline and print a summary.
 
     QWK thresholds are fit on **validation** logits only (no test-label leakage),
-    then applied to the test set. Pass ``valid_loader`` for threshold tuning;
-    if omitted, test predictions use argmax only.
+    then applied to the test set.
+
+    - ``use_tta=False`` (default): requires ``test_loader``. If ``valid_loader`` is set,
+      thresholds are fit on val **single-view** predictions then applied to test.
+    - ``use_tta=True``: requires ``valid_df`` and ``test_df`` (same split as training).
+      Val and test use ``predict_with_tta``; thresholds are fit on TTA val probs.
+      Optional ``test_loader`` is only used for ``show_misclassified`` (single-view).
 
     Generates:
     - Printed classification report
     - Confusion matrix (absolute + normalised)
     - ROC curves
-    - Misclassified gallery
+    - Misclassified gallery (if ``test_dataset`` and ``test_loader`` are set)
     """
-    y_true, y_pred, y_proba = predict(model, test_loader, device)
+    qwk_argmax_no_tta: float | None = None
 
-    if valid_loader is not None:
-        try:
-            val_y, _, val_proba = predict(model, valid_loader, device)
-            thresholds = optimize_qwk_thresholds(val_proba, val_y)
-            y_pred = apply_qwk_thresholds(y_proba, thresholds)
-            print(f"Applied QWK thresholds fit on validation (no test-label leakage): {thresholds}")
-        except Exception as e:
-            print(f"Threshold optimization (validation) failed: {e}")
-    else:
-        print(
-            "No valid_loader passed — skipping threshold optimization "
-            "(argmax predictions only; pass valid_loader to enable val-fit thresholds)."
+    if use_tta:
+        if valid_df is None or test_df is None:
+            raise ValueError("use_tta=True requires valid_df and test_df (DataFrames).")
+        tta_bs = tta_batch_size if tta_batch_size is not None else config.STAGE2_BATCH_SIZE
+        val_y, _, val_proba = predict_with_tta(
+            model, valid_df, dataset_name, device, batch_size=tta_bs
         )
+        thresholds = optimize_qwk_thresholds(val_proba, val_y)
+        y_true, _, y_proba = predict_with_tta(
+            model, test_df, dataset_name, device, batch_size=tta_bs
+        )
+        y_pred = apply_qwk_thresholds(y_proba, thresholds)
+        print(f"TTA eval: thresholds from TTA validation: {thresholds}")
+        if test_loader is not None:
+            try:
+                yt0, yp0, pr0 = predict(model, test_loader, device)
+                qwk_argmax_no_tta = float(compute_metrics(yt0, yp0, pr0)["qwk"])
+                print(f"Reference QWK (argmax, single-view test, no TTA): {qwk_argmax_no_tta:.4f}")
+            except Exception as e:
+                print(f"Could not compute single-view reference QWK: {e}")
+    else:
+        if test_loader is None:
+            raise ValueError("test_loader is required when use_tta=False.")
+        y_true, y_pred, y_proba = predict(model, test_loader, device)
+
+        if valid_loader is not None:
+            try:
+                val_y, _, val_proba = predict(model, valid_loader, device)
+                thresholds = optimize_qwk_thresholds(val_proba, val_y)
+                y_pred = apply_qwk_thresholds(y_proba, thresholds)
+                print(
+                    "Applied QWK thresholds fit on validation (no test-label leakage): "
+                    f"{thresholds}"
+                )
+            except Exception as e:
+                print(f"Threshold optimization (validation) failed: {e}")
+        else:
+            print(
+                "No valid_loader passed — skipping threshold optimization "
+                "(argmax predictions only; pass valid_loader to enable val-fit thresholds)."
+            )
 
     metrics = compute_metrics(y_true, y_pred, y_proba)
+    metrics["tta_used"] = bool(use_tta)
+    if qwk_argmax_no_tta is not None:
+        metrics["qwk_argmax_no_tta"] = qwk_argmax_no_tta
+        metrics["qwk_no_tta"] = (
+            qwk_argmax_no_tta  # single-view test QWK (argmax) for TTA comparison
+        )
 
     print("=" * 60)
     print("EVALUATION RESULTS")
@@ -485,7 +538,7 @@ def full_evaluation(
         save_path=os.path.join(save_dir, "roc_curves.png"),
     )
 
-    if test_dataset is not None:
+    if test_dataset is not None and test_loader is not None:
         show_misclassified(
             model,
             test_loader,
@@ -536,7 +589,7 @@ def predict_single_image(
 
     model.eval()
     with torch.no_grad():
-        with autocast("cuda", enabled=device.type == "cuda"):
+        with _eval_autocast(device):
             logits = model(tensor)
         probs = torch.softmax(logits, dim=1).cpu().numpy()[0]
 
@@ -630,7 +683,7 @@ def predict_with_tta(
         labels_list = []
         for images, labels in loader:
             images = images.to(device, non_blocking=True)
-            with autocast("cuda", enabled=device.type == "cuda"):
+            with _eval_autocast(device):
                 logits = model(images)
             probs_list.append(torch.softmax(logits, dim=1).cpu().numpy())
             labels_list.append(labels.numpy())

@@ -9,6 +9,7 @@ Phase 3 — full unfreeze with full augmentation (Mixup optional via config)
 Checkpointing on Quadratic Weighted Kappa (the clinical gold-standard metric).
 """
 
+import contextlib
 import json
 import math
 import os
@@ -150,7 +151,17 @@ class Trainer:
         else:
             self.class_weights = None
 
-        self.scaler = GradScaler(device.type, enabled=device.type == "cuda")
+        self._amp_dtype, self._use_grad_scaler = config.resolve_amp(self.device)
+        self.scaler = GradScaler(
+            device.type,
+            enabled=device.type == "cuda" and self._use_grad_scaler,
+        )
+        if self.device.type == "cuda" and self._amp_dtype is not None:
+            logger.info(
+                "AMP dtype=%s grad_scaler=%s",
+                self._amp_dtype,
+                self._use_grad_scaler,
+            )
         self.history: dict[str, list] = {
             "train_loss": [],
             "train_acc": [],
@@ -161,6 +172,12 @@ class Trainer:
             "lr": [],
         }
         self.best_kappa = -1.0
+
+    def _autocast(self, enabled: bool):
+        """CUDA autocast with config AMP dtype; null context when disabled or CPU."""
+        if not enabled or self.device.type != "cuda" or self._amp_dtype is None:
+            return contextlib.nullcontext()
+        return autocast("cuda", dtype=self._amp_dtype, enabled=True)
 
     def _build_criterion(self, reduction: str = "mean") -> nn.Module:
         """Build the loss function based on config flags."""
@@ -242,7 +259,7 @@ class Trainer:
 
             optimizer.zero_grad(set_to_none=True)
 
-            with autocast("cuda", enabled=amp_on):
+            with self._autocast(amp_on):
                 outputs = self.model(images)
 
                 # --- Loss computation (clean, no branching) ---
@@ -270,13 +287,13 @@ class Trainer:
             if not torch.isfinite(loss).all():
                 logger.warning(
                     "Non-finite training loss; skipping batch"
-                    + (" (GradScaler updated)." if amp_on else ".")
+                    + (" (GradScaler updated)." if self._use_grad_scaler and amp_on else ".")
                 )
-                if amp_on:
+                if self._use_grad_scaler and amp_on:
                     self.scaler.update()
                 continue
 
-            if amp_on:
+            if self._use_grad_scaler and amp_on:
                 self.scaler.scale(loss).backward()
                 self.scaler.unscale_(optimizer)
                 nn.utils.clip_grad_norm_(
@@ -345,7 +362,7 @@ class Trainer:
             images = images.to(self.device, non_blocking=True)
             labels = labels.to(self.device, non_blocking=True)
 
-            with autocast("cuda", enabled=amp_on):
+            with self._autocast(amp_on):
                 outputs = eval_model(images)
                 loss = criterion(outputs, labels)
 
@@ -384,7 +401,7 @@ class Trainer:
         }
         if optimizer is not None:
             ckpt["optimizer_state_dict"] = optimizer.state_dict()
-        if scaler is not None:
+        if scaler is not None and self._use_grad_scaler:
             ckpt["scaler_state_dict"] = scaler.state_dict()
         if self.ema is not None:
             ckpt["ema_state_dict"] = self.ema.state_dict()
@@ -448,7 +465,8 @@ class Trainer:
         logger.info(f"\n{'=' * 60}")
         logger.info(
             f"Phase: {phase.upper()} | Epochs: {epochs} | LR: {lr} | "
-            f"Mixup: {use_mixup} | AMP: {use_amp and self.device.type == 'cuda'}"
+            f"Mixup: {use_mixup} | AMP: {use_amp and self.device.type == 'cuda'} "
+            f"(dtype={self._amp_dtype}, scaler={self._use_grad_scaler})"
         )
         logger.info(f"{'=' * 60}")
 
@@ -493,7 +511,7 @@ class Trainer:
                     phase,
                     val_metrics,
                     optimizer=optimizer,
-                    scaler=self.scaler,
+                    scaler=self.scaler if self._use_grad_scaler else None,
                 )
 
             if early_stop(val_metrics["kappa"]):

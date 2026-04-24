@@ -84,7 +84,7 @@ diabetic_retinopathy/
 ├── outputs/
 │   ├── checkpoints/                   # Model weights (.pth + .onnx)
 │   ├── figures/                       # Plots and visualisations
-│   └── logs/                          # Training history
+│   └── logs/                          # Training history + `run_manifest.json`
 ├── train_pipeline.py                  # Master 2-stage training script
 ├── pyproject.toml                     # Project metadata, deps, ruff config
 ├── .python-version                    # Python version pin
@@ -114,9 +114,20 @@ uv run python train_pipeline.py
 # Or quick test (1-2 epochs per phase)
 uv run python train_pipeline.py --dry-run
 
-# Run notebooks
+# Final evaluation with test-time augmentation (slower)
+uv run python train_pipeline.py --tta
+
+# Run notebooks (recommended primary workflow)
 uv run jupyter notebook notebooks/
 ```
+
+### Notebook-first workflow and run manifest
+
+The intended path is **`notebooks/03_training.ipynb` → `03b_aptos_finetuning.ipynb` → `04_evaluation.ipynb`**. `train_pipeline.py` stays available for a single CLI run and writes the same **`outputs/logs/run_manifest.json`** (merged JSON: stages, `AMP_DTYPE`, checkpoints, optional eval summary).
+
+- **`config.AMP_DTYPE`**: default **bfloat16** on CUDA when supported (Trainer uses autocast with that dtype and skips GradScaler). Override with **`DR_AMP_DTYPE=float16`** for FP16 + GradScaler.
+- **`full_evaluation(..., use_tta=True, valid_df=..., test_df=..., dataset_name="aptos")`**: validation and test predictions use TTA; QWK thresholds are fit on **validation TTA** probabilities only, then applied to **test TTA** (no test-label leakage). When `use_tta=False`, behaviour matches the previous API (pass `test_loader`; optional `valid_loader` for val-fit thresholds on single-view predictions).
+- **`write_run_manifest(path, payload, merge=False)`** in `src/utils.py`: notebooks and the CLI merge stage/eval fields into the manifest path above.
 
 ### Option 2: Local / GPU Server (with pip)
 
