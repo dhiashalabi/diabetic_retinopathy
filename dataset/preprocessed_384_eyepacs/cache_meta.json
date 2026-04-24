@@ -1,8 +1,9 @@
 {
   "cache_image_format": "png",
   "cache_image_quality": 95,
+  "dataset_name": "eyepacs",
   "img_size": 384,
-  "num_unique_images": 35108,
+  "num_unique_images": 5267,
   "source_images_dir": "/teamspace/studios/this_studio/diabetic_retinopathy/dataset/resized_train_cropped/resized_train_cropped",
-  "version": "v3"
+  "version": "v7"
 }

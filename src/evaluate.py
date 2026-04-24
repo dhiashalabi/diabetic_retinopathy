@@ -13,11 +13,13 @@ Metrics:
 - Test-Time Augmentation (TTA)
 """
 
+import contextlib
 import os
 
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
+import scipy.optimize as opt
 import seaborn as sns
 import torch
 import torch.nn as nn
@@ -42,6 +44,19 @@ from .preprocessing import preprocess_image
 PLOT_DPI = 300
 
 
+def _eval_autocast(device: torch.device):
+    """Match training AMP dtype (bf16 on Hopper when configured)."""
+    dt, _ = config.resolve_amp(device)
+    if device.type == "cuda" and dt is not None:
+        return autocast("cuda", dtype=dt, enabled=True)
+    return contextlib.nullcontext()
+
+
+def _softmax_probs_numpy(logits: torch.Tensor) -> np.ndarray:
+    """Softmax then float32 CPU numpy (NumPy does not support bfloat16)."""
+    return torch.softmax(logits, dim=1).float().cpu().numpy()
+
+
 # -----------------------------------------------------------------------
 # Prediction helpers
 # -----------------------------------------------------------------------
@@ -64,9 +79,9 @@ def predict(
 
     for images, labels in tqdm(loader, desc="Predicting", leave=False):
         images = images.to(device, non_blocking=True)
-        with autocast("cuda", enabled=device.type == "cuda"):
+        with _eval_autocast(device):
             logits = model(images)
-        probs = torch.softmax(logits, dim=1).cpu().numpy()
+        probs = _softmax_probs_numpy(logits)
         all_probs.append(probs)
         all_labels.append(labels.numpy())
 
@@ -74,6 +89,86 @@ def predict(
     y_proba = np.concatenate(all_probs)
     y_pred = y_proba.argmax(axis=1)
     return y_true, y_pred, y_proba
+
+
+def _qwk_loss(coef, X, y):
+    """Loss function for threshold optimization."""
+    X_p = np.copy(X)
+    for i, pred in enumerate(X_p):
+        if pred < coef[0]:
+            X_p[i] = 0
+        elif pred < coef[1]:
+            X_p[i] = 1
+        elif pred < coef[2]:
+            X_p[i] = 2
+        elif pred < coef[3]:
+            X_p[i] = 3
+        else:
+            X_p[i] = 4
+
+    return -cohen_kappa_score(y, X_p, weights="quadratic")
+
+
+def optimize_qwk_thresholds(y_proba: np.ndarray, y_true: np.ndarray) -> list[float]:
+    """Optimize thresholds for converting ordinal probabilities/scores to class labels."""
+    # Convert probabilities to a continuous score [0-4] using expectation
+    scores = np.sum(y_proba * np.arange(config.NUM_CLASSES), axis=1)
+
+    initial_coef = [0.5, 1.5, 2.5, 3.5]
+    res = opt.minimize(_qwk_loss, initial_coef, args=(scores, y_true), method="Nelder-Mead")
+    return res.x.tolist()
+
+
+def apply_qwk_thresholds(y_proba: np.ndarray, coef: list[float]) -> np.ndarray:
+    """Apply learned thresholds to generate integer predictions."""
+    scores = np.sum(y_proba * np.arange(config.NUM_CLASSES), axis=1)
+    y_pred = np.zeros_like(scores, dtype=int)
+    for i, pred in enumerate(scores):
+        if pred < coef[0]:
+            y_pred[i] = 0
+        elif pred < coef[1]:
+            y_pred[i] = 1
+        elif pred < coef[2]:
+            y_pred[i] = 2
+        elif pred < coef[3]:
+            y_pred[i] = 3
+        else:
+            y_pred[i] = 4
+    return y_pred
+
+
+@torch.no_grad()
+def predict_ensemble(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    phases: list[str] = ["phase2", "phase3"],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Average predictions from multiple checkpoint phases."""
+    all_probas = []
+    y_true = None
+
+    for phase in phases:
+        path = os.path.join(config.CHECKPOINTS_DIR, f"best_model_{phase}.pth")
+        if not os.path.exists(path):
+            print(f"Skipping phase {phase}, checkpoint not found.")
+            continue
+
+        ckpt = torch.load(path, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model_state_dict"])
+
+        y_t, _, y_p = predict(model, loader, device)
+        all_probas.append(y_p)
+        if y_true is None:
+            y_true = y_t
+
+    if not all_probas:
+        raise ValueError("No valid checkpoints found for ensemble")
+
+    y_proba_ensemble = np.mean(all_probas, axis=0)
+    y_pred_ensemble = y_proba_ensemble.argmax(axis=1)
+
+    return y_true, y_pred_ensemble, y_proba_ensemble
 
 
 # -----------------------------------------------------------------------
@@ -207,8 +302,17 @@ def plot_roc_curves(
 def plot_training_curves(
     history: dict[str, list],
     save_path: str | None = None,
+    phase_boundaries: list[int] | None = None,
 ):
-    """Plot loss, accuracy, and QWK over training epochs."""
+    """
+    Plot loss, accuracy, and QWK over training epochs.
+
+    Parameters
+    ----------
+    phase_boundaries : list[int], optional
+        Epoch indices where training phases change.
+        Defaults to [PHASE1_EPOCHS, PHASE1_EPOCHS + PHASE2_EPOCHS].
+    """
     epochs = range(1, len(history["train_loss"]) + 1)
 
     fig, axes = plt.subplots(1, 3, figsize=(20, 5))
@@ -241,29 +345,28 @@ def plot_training_curves(
     axes[2].grid(True, alpha=0.3)
 
     # Mark phase boundaries
-    p1_end = config.PHASE1_EPOCHS
-    if p1_end < len(history["train_loss"]):
-        for ax in axes:
-            ax.axvline(
-                p1_end + 0.5,
-                color="grey",
-                ls="--",
-                alpha=0.6,
-                label="Partial unfreeze" if ax == axes[0] else None,
-            )
+    if phase_boundaries is None:
+        phase_boundaries = [
+            config.STAGE1_PHASE1_EPOCHS,
+            config.STAGE1_PHASE1_EPOCHS + config.STAGE1_PHASE2_EPOCHS,
+        ]
 
-    p2_end = config.PHASE1_EPOCHS + config.PHASE2_EPOCHS
-    if p2_end < len(history["train_loss"]):
-        for ax in axes:
-            ax.axvline(
-                p2_end + 0.5,
-                color="grey",
-                ls=":",
-                alpha=0.6,
-                label="Full unfreeze" if ax == axes[0] else None,
-            )
+    boundary_labels = ["Partial unfreeze", "Full unfreeze"]
+    boundary_styles = ["--", ":"]
+    for i, boundary in enumerate(phase_boundaries):
+        if boundary < len(history["train_loss"]):
+            label = boundary_labels[i] if i < len(boundary_labels) else f"Phase {i + 2}"
+            style = boundary_styles[i] if i < len(boundary_styles) else "--"
+            for ax in axes:
+                ax.axvline(
+                    boundary + 0.5,
+                    color="grey",
+                    ls=style,
+                    alpha=0.6,
+                    label=label if ax == axes[0] else None,
+                )
 
-    if p1_end < len(history["train_loss"]):
+    if phase_boundaries and phase_boundaries[0] < len(history["train_loss"]):
         axes[0].legend()
 
     plt.tight_layout()
@@ -334,22 +437,86 @@ def show_misclassified(
 
 def full_evaluation(
     model: nn.Module,
-    test_loader: DataLoader,
+    test_loader: DataLoader | None,
     device: torch.device,
     test_dataset=None,
+    valid_loader: DataLoader | None = None,
     save_dir: str = config.FIGURES_DIR,
+    use_tta: bool = False,
+    valid_df=None,
+    test_df=None,
+    dataset_name: str = "aptos",
+    tta_batch_size: int | None = None,
 ):
     """
     Run the complete evaluation pipeline and print a summary.
+
+    QWK thresholds are fit on **validation** logits only (no test-label leakage),
+    then applied to the test set.
+
+    - ``use_tta=False`` (default): requires ``test_loader``. If ``valid_loader`` is set,
+      thresholds are fit on val **single-view** predictions then applied to test.
+    - ``use_tta=True``: requires ``valid_df`` and ``test_df`` (same split as training).
+      Val and test use ``predict_with_tta``; thresholds are fit on TTA val probs.
+      Optional ``test_loader`` is only used for ``show_misclassified`` (single-view).
 
     Generates:
     - Printed classification report
     - Confusion matrix (absolute + normalised)
     - ROC curves
-    - Misclassified gallery
+    - Misclassified gallery (if ``test_dataset`` and ``test_loader`` are set)
     """
-    y_true, y_pred, y_proba = predict(model, test_loader, device)
+    qwk_argmax_no_tta: float | None = None
+
+    if use_tta:
+        if valid_df is None or test_df is None:
+            raise ValueError("use_tta=True requires valid_df and test_df (DataFrames).")
+        tta_bs = tta_batch_size if tta_batch_size is not None else config.STAGE2_BATCH_SIZE
+        val_y, _, val_proba = predict_with_tta(
+            model, valid_df, dataset_name, device, batch_size=tta_bs
+        )
+        thresholds = optimize_qwk_thresholds(val_proba, val_y)
+        y_true, _, y_proba = predict_with_tta(
+            model, test_df, dataset_name, device, batch_size=tta_bs
+        )
+        y_pred = apply_qwk_thresholds(y_proba, thresholds)
+        print(f"TTA eval: thresholds from TTA validation: {thresholds}")
+        if test_loader is not None:
+            try:
+                yt0, yp0, pr0 = predict(model, test_loader, device)
+                qwk_argmax_no_tta = float(compute_metrics(yt0, yp0, pr0)["qwk"])
+                print(f"Reference QWK (argmax, single-view test, no TTA): {qwk_argmax_no_tta:.4f}")
+            except Exception as e:
+                print(f"Could not compute single-view reference QWK: {e}")
+    else:
+        if test_loader is None:
+            raise ValueError("test_loader is required when use_tta=False.")
+        y_true, y_pred, y_proba = predict(model, test_loader, device)
+
+        if valid_loader is not None:
+            try:
+                val_y, _, val_proba = predict(model, valid_loader, device)
+                thresholds = optimize_qwk_thresholds(val_proba, val_y)
+                y_pred = apply_qwk_thresholds(y_proba, thresholds)
+                print(
+                    "Applied QWK thresholds fit on validation (no test-label leakage): "
+                    f"{thresholds}"
+                )
+            except Exception as e:
+                print(f"Threshold optimization (validation) failed: {e}")
+        else:
+            print(
+                "No valid_loader passed — skipping threshold optimization "
+                "(argmax predictions only; pass valid_loader to enable val-fit thresholds)."
+            )
+
     metrics = compute_metrics(y_true, y_pred, y_proba)
+    metrics["tta_used"] = bool(use_tta)
+    if qwk_argmax_no_tta is not None:
+        metrics["qwk_argmax_no_tta"] = qwk_argmax_no_tta
+        metrics["qwk_no_tta"] = (
+            qwk_argmax_no_tta  # single-view test QWK (argmax) for TTA comparison
+        )
 
     print("=" * 60)
     print("EVALUATION RESULTS")
@@ -376,7 +543,7 @@ def full_evaluation(
         save_path=os.path.join(save_dir, "roc_curves.png"),
     )
 
-    if test_dataset is not None:
+    if test_dataset is not None and test_loader is not None:
         show_misclassified(
             model,
             test_loader,
@@ -427,9 +594,9 @@ def predict_single_image(
 
     model.eval()
     with torch.no_grad():
-        with autocast("cuda", enabled=device.type == "cuda"):
+        with _eval_autocast(device):
             logits = model(tensor)
-        probs = torch.softmax(logits, dim=1).cpu().numpy()[0]
+        probs = _softmax_probs_numpy(logits)[0]
 
     pred_idx = int(probs.argmax())
     pred_class = class_names[pred_idx]
@@ -482,14 +649,18 @@ def predict_single_image(
 def predict_with_tta(
     model: nn.Module,
     dataset_df,
-    images_dir: str,
+    dataset_name: str,
     device: torch.device,
     img_size: int = config.IMG_SIZE,
-    batch_size: int = 16,
+    batch_size: int = 32,
+    max_tta_views: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Predict with Test-Time Augmentation by averaging softmax probabilities
     across multiple geometric transforms.
+
+    ``max_tta_views`` — if set, use only the first N transforms from
+    ``get_tta_transforms`` (e.g. 4 for a faster TTA ablation).
 
     Returns (y_true, y_pred, y_proba).
     """
@@ -497,6 +668,8 @@ def predict_with_tta(
 
     model.eval()
     tta_transforms = get_tta_transforms(img_size)
+    if max_tta_views is not None:
+        tta_transforms = tta_transforms[:max_tta_views]
 
     all_probs_per_tta = []
     y_true = None
@@ -504,7 +677,7 @@ def predict_with_tta(
     for tfm in tqdm(tta_transforms, desc="TTA transforms"):
         ds = DRDataset(
             dataset_df,
-            images_dir=images_dir,
+            dataset_name=dataset_name,
             transform=tfm,
             preprocessing=True,
             img_size=img_size,
@@ -521,9 +694,9 @@ def predict_with_tta(
         labels_list = []
         for images, labels in loader:
             images = images.to(device, non_blocking=True)
-            with autocast("cuda", enabled=device.type == "cuda"):
+            with _eval_autocast(device):
                 logits = model(images)
-            probs_list.append(torch.softmax(logits, dim=1).cpu().numpy())
+            probs_list.append(_softmax_probs_numpy(logits))
             labels_list.append(labels.numpy())
 
         all_probs_per_tta.append(np.concatenate(probs_list))

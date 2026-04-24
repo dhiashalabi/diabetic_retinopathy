@@ -5,6 +5,7 @@ Implements:
 - Automatic fundus cropping (remove black borders)
 - CLAHE enhancement in LAB colour space
 - Ben Graham preprocessing (local colour subtraction)
+- Circular mask to remove edge artefacts
 """
 
 import cv2
@@ -20,6 +21,9 @@ def crop_fundus(img: np.ndarray, tolerance: int = 15) -> np.ndarray:
     Converts to grayscale, thresholds to find the bright fundus region,
     and returns the tightly cropped bounding box.
     """
+    if img is None or img.size == 0:
+        return img
+
     gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
     _, mask = cv2.threshold(gray, tolerance, 255, cv2.THRESH_BINARY)
 
@@ -29,6 +33,10 @@ def crop_fundus(img: np.ndarray, tolerance: int = 15) -> np.ndarray:
 
     largest = max(contours, key=cv2.contourArea)
     x, y, w, h = cv2.boundingRect(largest)
+
+    # Minimal area check — avoid tiny crops from noise
+    if w * h < 100:
+        return img
 
     pad = 5
     x = max(0, x - pad)
@@ -82,13 +90,13 @@ def apply_circular_mask(img: np.ndarray) -> np.ndarray:
     """
     Apply a circular mask to remove edge artefacts from cropping.
 
-    The mask is centred on the image and its radius is 90% of the
-    smaller dimension to safely cover the fundus disc.
+    The mask is centred on the image; radius is ~49% of the smaller
+    dimension to cover the disc while clipping less peripheral retina.
     """
     h, w = img.shape[:2]
     mask = np.zeros((h, w), dtype=np.uint8)
     centre = (w // 2, h // 2)
-    radius = int(min(h, w) * 0.45)
+    radius = int(min(h, w) * 0.49)
     cv2.circle(mask, centre, radius, 255, -1)
 
     result = img.copy()
@@ -99,10 +107,10 @@ def apply_circular_mask(img: np.ndarray) -> np.ndarray:
 def preprocess_image(
     img: np.ndarray,
     img_size: int = config.IMG_SIZE,
-    use_ben_graham: bool = False,
+    use_ben_graham: bool = config.USE_BEN_GRAHAM,
     use_clahe: bool = True,
     use_crop: bool = True,
-    use_circular_mask: bool = False,
+    use_circular_mask: bool = config.USE_CIRCULAR_MASK,
 ) -> np.ndarray:
     """
     Full preprocessing pipeline for a single retinal image.

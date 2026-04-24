@@ -24,13 +24,18 @@ desktop.ini
 # Project outputs (large checkpoints, logs, figures)
 # outputs/
 
-# Dataset (multi-GB, download via Kaggle)
-# Use dataset/* (not dataset/) so we can un-ignore specific paths under dataset/
+# Dataset — EyePACS (multi-GB, download via Kaggle)
 dataset/*
-!dataset/preprocessed_384/
-dataset/preprocessed_384/*
-!dataset/preprocessed_384/cache_meta.json
+!dataset/preprocessed_*/
+dataset/preprocessed_*/*
+!dataset/preprocessed_*/cache_meta.json
 *.zip
+
+# Dataset — APTOS (download via Kaggle)
+dataset_aptos/train_images/
+dataset_aptos/test_images/
+dataset_aptos/preprocessed_*/
+!dataset_aptos/preprocessed_*/cache_meta.json
 
 # Virtual environments
 venv/

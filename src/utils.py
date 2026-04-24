@@ -1,10 +1,12 @@
 """
-Utility helpers: reproducibility, device selection, logging.
+Utility helpers: reproducibility, device selection, logging, GPU monitoring.
 """
 
+import json
 import logging
 import os
 import random
+from datetime import datetime, timezone
 
 import numpy as np
 import torch
@@ -25,6 +27,10 @@ def seed_everything(seed: int = config.SEED) -> None:
     torch.backends.cudnn.benchmark = True
 
 
+# Backward-compatible alias (train_pipeline.py imports set_seed)
+set_seed = seed_everything
+
+
 def get_device() -> torch.device:
     """Return the best available device (CUDA > CPU)."""
     if torch.cuda.is_available():
@@ -36,6 +42,19 @@ def get_device() -> torch.device:
         device = torch.device("cpu")
         print("Using CPU")
     return device
+
+
+def log_gpu_memory(prefix: str = "") -> None:
+    """Log current GPU memory usage (useful for batch-size tuning)."""
+    if not torch.cuda.is_available():
+        return
+    allocated = torch.cuda.memory_allocated() / 1e9
+    reserved = torch.cuda.memory_reserved() / 1e9
+    total = torch.cuda.get_device_properties(0).total_memory / 1e9
+    msg = f"GPU Memory — Allocated: {allocated:.2f}GB | Reserved: {reserved:.2f}GB | Total: {total:.1f}GB"
+    if prefix:
+        msg = f"{prefix} | {msg}"
+    print(msg)
 
 
 def get_logger(name: str, log_file: str | None = None) -> logging.Logger:
@@ -63,3 +82,31 @@ def get_logger(name: str, log_file: str | None = None) -> logging.Logger:
         logger.addHandler(fh)
 
     return logger
+
+
+def write_run_manifest(path: str, payload: dict, merge: bool = False) -> None:
+    """
+    Write a JSON run manifest (hyperparameters, stage markers, eval metrics).
+
+    When ``merge`` is True, shallow-merge ``payload`` into an existing JSON object
+    at ``path`` (non-dict existing content is replaced). Parent directories are created.
+    """
+    dir_name = os.path.dirname(path)
+    if dir_name:
+        os.makedirs(dir_name, exist_ok=True)
+
+    base: dict = {}
+    if merge and os.path.isfile(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                base = loaded
+        except (json.JSONDecodeError, OSError):
+            base = {}
+
+    merged = {**base, **payload}
+    merged["_updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(merged, f, indent=2)

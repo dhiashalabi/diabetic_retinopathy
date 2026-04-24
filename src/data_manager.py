@@ -16,6 +16,7 @@ import zipfile
 logger = logging.getLogger(__name__)
 
 KAGGLE_DATASET = "tanlikesmath/diabetic-retinopathy-resized"
+KAGGLE_COMPETITION_APTOS = "aptos2019-blindness-detection"
 
 
 def _is_colab() -> bool:
@@ -107,6 +108,65 @@ def _dataset_exists(data_dir: str) -> bool:
     except OSError:
         return False
     return len(entries) > 100
+
+
+def _download_aptos_from_kaggle(data_dir: str) -> None:
+    """Download APTOS 2019 competition dataset."""
+    if not _has_kaggle_credentials() and _is_colab():
+        _setup_colab_kaggle_credentials()
+
+    if not _has_kaggle_credentials():
+        raise RuntimeError(
+            "Kaggle credentials not found. Set KAGGLE_USERNAME and KAGGLE_KEY "
+            "environment variables, or place kaggle.json in ~/.kaggle/"
+        )
+
+    from kaggle.api.kaggle_api_extended import KaggleApi
+
+    api = KaggleApi()
+    api.authenticate()
+
+    os.makedirs(data_dir, exist_ok=True)
+
+    logger.info(f"Downloading {KAGGLE_COMPETITION_APTOS} to {data_dir} ...")
+    api.competition_download_files(KAGGLE_COMPETITION_APTOS, path=data_dir, quiet=False)
+
+    zip_path = os.path.join(data_dir, f"{KAGGLE_COMPETITION_APTOS}.zip")
+    if not os.path.isfile(zip_path):
+        raise FileNotFoundError(f"Expected zip file not found: {zip_path}")
+
+    logger.info(f"Extracting {zip_path} to {data_dir} ...")
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        zf.extractall(data_dir)
+    os.remove(zip_path)
+    logger.info("APTOS download and extraction complete.")
+
+
+def ensure_aptos_dataset(data_dir: str | None = None) -> str:
+    """
+    Ensure the APTOS 2019 dataset is available.
+    Downloads from Kaggle if not present.
+    """
+    if data_dir is None:
+        from . import config
+        data_dir = config.APTOS_DATA_DIR
+
+    train_csv = os.path.join(data_dir, "train.csv")
+    if os.path.isfile(train_csv):
+        logger.info(f"APTOS dataset found at {data_dir}")
+        return data_dir
+
+    logger.info(f"APTOS dataset not found at {data_dir}. Downloading from Kaggle ...")
+    _download_aptos_from_kaggle(data_dir)
+
+    if not os.path.isfile(train_csv):
+        raise RuntimeError(
+            f"Download completed but APTOS dataset not found at {data_dir}. "
+            "Check the Kaggle dataset structure."
+        )
+
+    logger.info(f"APTOS dataset ready at {data_dir}")
+    return data_dir
 
 
 def ensure_dataset(data_dir: str | None = None) -> str:
