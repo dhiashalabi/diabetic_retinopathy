@@ -99,7 +99,6 @@ def get_train_transforms(img_size: int = config.IMG_SIZE) -> A.Compose:
                         sat_shift_limit=20,
                         val_shift_limit=20,
                     ),
-                    A.CLAHE(clip_limit=4.0, tile_grid_size=(8, 8)),
                     A.RandomGamma(gamma_limit=(80, 120)),
                 ],
                 p=0.4,

@@ -8,6 +8,7 @@ Usage:
     python train_pipeline.py               # Full pipeline
     python train_pipeline.py --dry-run     # 1-epoch test run
     python train_pipeline.py --stage2-only # Skip Stage 1 (requires existing checkpoint)
+    python train_pipeline.py --aptos-only  # APTOS only from ImageNet weights (ablation baseline)
 """
 
 import argparse
@@ -15,8 +16,10 @@ import gc
 import json
 import os
 import shutil
+from typing import cast
 
 import torch
+import torch.nn as nn
 
 from src import config
 from src.augmentations import get_light_train_transforms, get_train_transforms, get_valid_transforms
@@ -28,11 +31,31 @@ from src.dataset import (
     preprocess_images_to_cache,
 )
 from src.evaluate import full_evaluation
-from src.model import ModelEMA, build_model, count_parameters, freeze_backbone, unfreeze_backbone
+from src.model import (
+    DRModel,
+    ModelEMA,
+    build_model,
+    count_parameters,
+    freeze_backbone,
+    unfreeze_backbone,
+)
 from src.trainer import Trainer
 from src.utils import get_logger, log_gpu_memory, seed_everything
 
 logger = get_logger(__name__)
+
+
+def _maybe_torch_compile(model: nn.Module, device: torch.device) -> nn.Module:
+    """Optional torch.compile on CUDA for throughput (H100-friendly)."""
+    if device.type != "cuda" or not getattr(config, "USE_TORCH_COMPILE", False):
+        return model
+    try:
+        compiled = cast(nn.Module, torch.compile(model))
+        logger.info("torch.compile enabled for this stage.")
+        return compiled
+    except Exception as e:
+        logger.warning("torch.compile skipped: %s", e)
+        return model
 
 
 def run_stage1_eyepacs(device, dry_run: bool = False):
@@ -83,10 +106,11 @@ def run_stage1_eyepacs(device, dry_run: bool = False):
 
     # Model & EMA
     model = build_model(pretrained=True)
+    model = cast(DRModel, _maybe_torch_compile(model, device))
     logger.info(f"Model: {config.MODEL_NAME}")
     logger.info(f"Parameters: {count_parameters(model)}")
 
-    ema = ModelEMA(model) if config.USE_EMA else None
+    ema = ModelEMA(model, decay=config.EMA_DECAY) if config.USE_EMA else None
 
     # Class weights
     class_weights = compute_class_weights(train_df["level"].values)
@@ -131,6 +155,15 @@ def run_stage1_eyepacs(device, dry_run: bool = False):
 
     # --- Phase 3: Full Unfreeze ---
     trainer.load_best_checkpoint(phase="s1_phase2")
+    # Fresh loaders so sampler / worker state does not carry over from Phase 2
+    loaders_heavy = create_dataloaders(
+        train_df,
+        valid_df,
+        dataset_name="eyepacs",
+        train_transform=train_tfm_heavy,
+        valid_transform=valid_tfm,
+        batch_size=config.STAGE1_BATCH_SIZE,
+    )
     unfreeze_backbone(model, from_block=None)
     logger.info(f"Phase 3 trainable params: {count_parameters(model)}")
     trainer.fit_phase(
@@ -164,10 +197,18 @@ def run_stage1_eyepacs(device, dry_run: bool = False):
     return final_best_path
 
 
-def run_stage2_aptos(device, pretrained_weights_path: str, dry_run: bool = False):
+def run_stage2_aptos(
+    device,
+    pretrained_weights_path: str | None,
+    dry_run: bool = False,
+    aptos_only: bool = False,
+):
     """Stage 2: Fine-tune on APTOS with single-phase full unfreeze."""
     logger.info("=" * 70)
-    logger.info("  STAGE 2: Fine-tuning on APTOS 2019 (~3.6K images)")
+    if aptos_only:
+        logger.info("  STAGE 2 (APTOS-ONLY): Fine-tuning from ImageNet weights (ablation)")
+    else:
+        logger.info("  STAGE 2: Fine-tuning on APTOS 2019 (~3.6K images)")
     logger.info("=" * 70)
 
     # Load & split data
@@ -199,19 +240,22 @@ def run_stage2_aptos(device, pretrained_weights_path: str, dry_run: bool = False
         batch_size=config.STAGE2_BATCH_SIZE,
     )
 
-    # Model — load from Stage 1 weights
-    model = build_model(pretrained=False)
+    # Model — Stage 1 weights or ImageNet-only (ablation)
+    if aptos_only:
+        model = build_model(pretrained=True)
+        logger.info("APTOS-only mode: training from ImageNet pretrained weights (no EyePACS).")
+    else:
+        model = build_model(pretrained=False)
+        if not pretrained_weights_path or not os.path.exists(pretrained_weights_path):
+            raise FileNotFoundError(
+                f"Stage 1 weights missing at {pretrained_weights_path}. Run Stage 1 first."
+            )
+        logger.info(f"Loading Stage 1 weights: {pretrained_weights_path}")
+        ckpt = torch.load(pretrained_weights_path, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model_state_dict"])
 
-    if not os.path.exists(pretrained_weights_path):
-        raise FileNotFoundError(
-            f"Stage 1 weights missing at {pretrained_weights_path}. Run Stage 1 first."
-        )
-
-    logger.info(f"Loading Stage 1 weights: {pretrained_weights_path}")
-    ckpt = torch.load(pretrained_weights_path, map_location=device, weights_only=False)
-    model.load_state_dict(ckpt["model_state_dict"])
-
-    ema = ModelEMA(model) if config.USE_EMA else None
+    model = cast(DRModel, _maybe_torch_compile(model, device))
+    ema = ModelEMA(model, decay=config.STAGE2_EMA_DECAY) if config.USE_EMA else None
 
     # Class weights for APTOS
     class_weights = compute_class_weights(train_df["level"].values)
@@ -254,10 +298,12 @@ def run_stage2_aptos(device, pretrained_weights_path: str, dry_run: bool = False
             loaders["test"],
             device,
             test_dataset=test_dataset,
+            valid_loader=loaders["valid"],
         )
 
         # Save metrics
-        metrics_path = os.path.join(config.OUTPUTS_DIR, "final_aptos_metrics.json")
+        metrics_name = "aptos_only_metrics.json" if aptos_only else "final_aptos_metrics.json"
+        metrics_path = os.path.join(config.OUTPUTS_DIR, metrics_name)
         dump_metrics = {}
         for k, v in metrics.items():
             if isinstance(v, (dict, str)):
@@ -285,11 +331,18 @@ def main():
     parser.add_argument(
         "--stage2-only", action="store_true", help="Skip Stage 1, go directly to APTOS fine-tuning"
     )
+    parser.add_argument(
+        "--aptos-only",
+        action="store_true",
+        help="Skip Stage 1; fine-tune on APTOS from ImageNet weights only (ablation baseline)",
+    )
     args = parser.parse_args()
 
     config.ensure_dirs()
     seed_everything(config.SEED)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda":
+        torch.set_float32_matmul_precision("high")
     logger.info(f"Pipeline starting. Device: {device}")
     log_gpu_memory("Initial")
 
@@ -297,7 +350,12 @@ def main():
     ensure_dataset()
     ensure_aptos_dataset()
 
-    if args.stage2_only:
+    if args.aptos_only and args.stage2_only:
+        raise ValueError("Use either --aptos-only or --stage2-only, not both.")
+
+    if args.aptos_only:
+        best_eyepacs_weights = None
+    elif args.stage2_only:
         best_eyepacs_weights = os.path.join(config.CHECKPOINTS_DIR, "best_eyepacs_model.pth")
         if not os.path.exists(best_eyepacs_weights):
             raise FileNotFoundError(
@@ -314,7 +372,12 @@ def main():
             torch.cuda.empty_cache()
 
     # Stage 2
-    run_stage2_aptos(device, best_eyepacs_weights, dry_run=args.dry_run)
+    run_stage2_aptos(
+        device,
+        best_eyepacs_weights,
+        dry_run=args.dry_run,
+        aptos_only=args.aptos_only,
+    )
 
     logger.info("=" * 70)
     logger.info("  PIPELINE COMPLETE")

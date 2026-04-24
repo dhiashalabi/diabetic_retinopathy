@@ -90,13 +90,13 @@ def apply_circular_mask(img: np.ndarray) -> np.ndarray:
     """
     Apply a circular mask to remove edge artefacts from cropping.
 
-    The mask is centred on the image and its radius is 90% of the
-    smaller dimension to safely cover the fundus disc.
+    The mask is centred on the image; radius is ~49% of the smaller
+    dimension to cover the disc while clipping less peripheral retina.
     """
     h, w = img.shape[:2]
     mask = np.zeros((h, w), dtype=np.uint8)
     centre = (w // 2, h // 2)
-    radius = int(min(h, w) * 0.45)
+    radius = int(min(h, w) * 0.49)
     cv2.circle(mask, centre, radius, 255, -1)
 
     result = img.copy()

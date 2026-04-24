@@ -426,10 +426,15 @@ def full_evaluation(
     test_loader: DataLoader,
     device: torch.device,
     test_dataset=None,
+    valid_loader: DataLoader | None = None,
     save_dir: str = config.FIGURES_DIR,
 ):
     """
     Run the complete evaluation pipeline and print a summary.
+
+    QWK thresholds are fit on **validation** logits only (no test-label leakage),
+    then applied to the test set. Pass ``valid_loader`` for threshold tuning;
+    if omitted, test predictions use argmax only.
 
     Generates:
     - Printed classification report
@@ -439,17 +444,19 @@ def full_evaluation(
     """
     y_true, y_pred, y_proba = predict(model, test_loader, device)
 
-    # Try threshold optimization if validation/test
-    try:
-        thresholds = optimize_qwk_thresholds(y_proba, y_true)
-        y_pred_opt = apply_qwk_thresholds(y_proba, thresholds)
-        opt_metrics = compute_metrics(y_true, y_pred_opt, y_proba)
-        # Use optimized predictions if they are better
-        if opt_metrics["qwk"] > compute_metrics(y_true, y_pred, y_proba)["qwk"]:
-            y_pred = y_pred_opt
-            print(f"Using optimized thresholds: {thresholds}")
-    except Exception as e:
-        print(f"Threshold optimization failed: {e}")
+    if valid_loader is not None:
+        try:
+            val_y, _, val_proba = predict(model, valid_loader, device)
+            thresholds = optimize_qwk_thresholds(val_proba, val_y)
+            y_pred = apply_qwk_thresholds(y_proba, thresholds)
+            print(f"Applied QWK thresholds fit on validation (no test-label leakage): {thresholds}")
+        except Exception as e:
+            print(f"Threshold optimization (validation) failed: {e}")
+    else:
+        print(
+            "No valid_loader passed — skipping threshold optimization "
+            "(argmax predictions only; pass valid_loader to enable val-fit thresholds)."
+        )
 
     metrics = compute_metrics(y_true, y_pred, y_proba)
 

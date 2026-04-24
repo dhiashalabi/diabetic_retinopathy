@@ -70,7 +70,7 @@ STOCHASTIC_DEPTH_RATE = 0.2
 # ---------------------------------------------------------------------------
 # Preprocessing defaults
 # ---------------------------------------------------------------------------
-USE_BEN_GRAHAM = True
+USE_BEN_GRAHAM = False  # Avoid stacking with CLAHE; keeps pixels closer to ImageNet stats
 USE_CIRCULAR_MASK = True
 
 TRAIN_RATIO = 0.70
@@ -81,7 +81,7 @@ TEST_RATIO = 0.15
 # Preprocessing cache
 # ---------------------------------------------------------------------------
 USE_PREPROCESSED_CACHE = True
-PREPROCESSING_CACHE_VERSION = "v6"
+PREPROCESSING_CACHE_VERSION = "v7"
 CACHE_IMAGE_FORMAT = "png"
 CACHE_IMAGE_QUALITY = 95
 CACHE_PNG_COMPRESSION = 3
@@ -115,7 +115,7 @@ PHASE2_EPOCHS = STAGE1_PHASE2_EPOCHS
 # ---------------------------------------------------------------------------
 # Small, clean dataset. Very low LR, single-phase full unfreeze.
 STAGE2_EPOCHS = 25
-STAGE2_LR = 1e-5
+STAGE2_LR = 3e-5
 STAGE2_WEIGHT_DECAY = 1e-3
 STAGE2_BATCH_SIZE = 32  # Smaller for fine-tuning stability
 STAGE2_WARMUP_EPOCHS = 3
@@ -154,7 +154,8 @@ CONSISTENCY_WEIGHT = 0.5
 
 # Exponential Moving Average
 USE_EMA = True
-EMA_DECAY = 0.9999
+EMA_DECAY = 0.9999  # Stage 1 (many iterations); Stage 2 uses STAGE2_EMA_DECAY in train_pipeline
+STAGE2_EMA_DECAY = 0.999
 
 # ---------------------------------------------------------------------------
 # Model comparison (notebook 06)
@@ -176,6 +177,9 @@ else:
 
 PREFETCH_FACTOR = 4
 PIN_MEMORY = True
+
+# Optional: torch.compile on CUDA (H100 / Ampere+); can add small first-epoch overhead
+USE_TORCH_COMPILE = True
 
 
 def ensure_dirs():
