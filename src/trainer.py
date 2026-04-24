@@ -144,6 +144,8 @@ class Trainer:
         self.model = model.to(device)
         self.device = device
         self.ema = ema
+        if self.ema is not None:
+            self.ema.shadow = self.ema.shadow.to(self.device)
 
         # Class weights for loss function
         if config.USE_CLASS_WEIGHTED_LOSS and class_weights is not None:
