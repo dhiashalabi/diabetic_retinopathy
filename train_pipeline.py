@@ -46,7 +46,7 @@ logger = get_logger(__name__)
 
 
 def _maybe_torch_compile(model: nn.Module, device: torch.device) -> nn.Module:
-    """Optional torch.compile on CUDA for throughput (H100-friendly)."""
+    """Optional torch.compile on CUDA for throughput (Hopper H100/H200-friendly)."""
     if device.type != "cuda" or not getattr(config, "USE_TORCH_COMPILE", False):
         return model
     try:

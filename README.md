@@ -137,6 +137,8 @@ jupyter notebook notebooks/
 
 ### GPU Server Quick Start (RunPod / DigitalOcean / Lambda)
 
+Defaults in `src/config.py` assume a **single NVIDIA H200** (~141 GB VRAM, Hopper-class) and **~16 CPU cores** (`STAGE1_BATCH_SIZE=96`, `STAGE2_BATCH_SIZE=64`, up to 14 dataloader workers). On smaller GPUs (for example 24 GB), reduce those batch sizes before training.
+
 ```bash
 git clone <your-repo-url> && cd diabetic_retinopathy
 curl -LsSf https://astral.sh/uv/install.sh | sh

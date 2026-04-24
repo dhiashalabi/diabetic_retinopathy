@@ -594,7 +594,7 @@ def predict_with_tta(
     dataset_name: str,
     device: torch.device,
     img_size: int = config.IMG_SIZE,
-    batch_size: int = 16,
+    batch_size: int = 32,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Predict with Test-Time Augmentation by averaging softmax probabilities

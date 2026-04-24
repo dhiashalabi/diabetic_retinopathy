@@ -60,6 +60,8 @@ CLASS_NAMES = ["No_DR", "Mild", "Moderate", "Severe", "Proliferative_DR"]
 # ---------------------------------------------------------------------------
 # Reproducibility & Model
 # ---------------------------------------------------------------------------
+# Training defaults below are sized for: NVIDIA H200 (~141 GB VRAM, ~1979 TFLOPS
+# peak tensor spec), 16 CPUs. Adjust batch sizes if your machine differs.
 SEED = 42
 IMG_SIZE = 384
 IMG_MEAN = [0.485, 0.456, 0.406]
@@ -104,7 +106,9 @@ STAGE1_PHASE3_EPOCHS = 15
 STAGE1_PHASE3_LR = 1e-5
 STAGE1_PHASE3_WD = 5e-4
 
-STAGE1_BATCH_SIZE = 48  # H100 85GB VRAM can handle 48-64 at 384×384
+# Batch sizes tuned for NVIDIA H200 (~141 GB VRAM), EfficientNetV2-S @ 384×384, AMP.
+# If you OOM (e.g. consistency reg + mixup spikes), lower STAGE1_BATCH_SIZE / STAGE2_BATCH_SIZE.
+STAGE1_BATCH_SIZE = 96
 
 # Backward-compatible aliases (used by evaluate.py training curve markers)
 PHASE1_EPOCHS = STAGE1_PHASE1_EPOCHS
@@ -117,7 +121,7 @@ PHASE2_EPOCHS = STAGE1_PHASE2_EPOCHS
 STAGE2_EPOCHS = 25
 STAGE2_LR = 3e-5
 STAGE2_WEIGHT_DECAY = 1e-3
-STAGE2_BATCH_SIZE = 32  # Smaller for fine-tuning stability
+STAGE2_BATCH_SIZE = 64  # H200: larger batches OK; backbone BN frozen
 STAGE2_WARMUP_EPOCHS = 3
 
 # ---------------------------------------------------------------------------
@@ -167,18 +171,19 @@ COMPARISON_MODELS = {
 }
 
 # ---------------------------------------------------------------------------
-# System
+# System (defaults assume a dedicated training box: H200-class GPU, ~16 CPUs)
 # ---------------------------------------------------------------------------
 if IS_COLAB:
     NUM_WORKERS = 2
 else:
-    _cpu_count = os.cpu_count() or 4
-    NUM_WORKERS = min(8, max(2, _cpu_count // 2))
+    _cpu_count = os.cpu_count() or 16
+    # Leave 2+ cores for the main process / OS; cap to avoid excessive IPC churn
+    NUM_WORKERS = min(14, _cpu_count - 2) if _cpu_count >= 16 else min(8, max(2, _cpu_count // 2))
 
 PREFETCH_FACTOR = 4
 PIN_MEMORY = True
 
-# Optional: torch.compile on CUDA (H100 / Ampere+); can add small first-epoch overhead
+# Optional: torch.compile on CUDA (Hopper H100/H200, Ada, Ampere+); first epoch may compile
 USE_TORCH_COMPILE = True
 
 
