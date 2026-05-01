@@ -46,9 +46,10 @@ class CosineWarmupScheduler:
         self.min_lr = min_lr
         self.base_lrs = [pg["lr"] for pg in optimizer.param_groups]
 
-    def step(self, epoch: int):
+    def step(self, epoch: float):
+        """Update LR from a continuous epoch value, e.g. epoch + batch_idx / num_batches."""
         if epoch < self.warmup_epochs:
-            factor = (epoch + 1) / self.warmup_epochs
+            factor = epoch / max(1e-8, self.warmup_epochs)
         else:
             progress = (epoch - self.warmup_epochs) / max(1, self.total_epochs - self.warmup_epochs)
             factor = 0.5 * (1.0 + math.cos(math.pi * progress))
@@ -154,10 +155,13 @@ class Trainer:
             self.class_weights = None
 
         self._amp_dtype, self._use_grad_scaler = config.resolve_amp(self.device)
-        self.scaler = GradScaler(
-            device.type,
-            enabled=device.type == "cuda" and self._use_grad_scaler,
-        )
+
+        if self.device.type == "cuda" and self._use_grad_scaler:
+            self.scaler = GradScaler(device.type, enabled=True)
+        else:
+            self.scaler = None
+            self._use_grad_scaler = False  # Ensure it's fully off
+
         if self.device.type == "cuda" and self._amp_dtype is not None:
             logger.info(
                 "AMP dtype=%s grad_scaler=%s",
@@ -165,6 +169,7 @@ class Trainer:
                 self._use_grad_scaler,
             )
         self.history: dict[str, list] = {
+            "phase": [],
             "train_loss": [],
             "train_acc": [],
             "train_kappa": [],
@@ -218,19 +223,29 @@ class Trainer:
                 if isinstance(module, (nn.BatchNorm2d, nn.SyncBatchNorm)):
                     module.eval()
 
+    @staticmethod
+    def _should_unfreeze_bn(phase: str) -> bool:
+        """Allow BatchNorm stats to adapt during final unfreeze phases."""
+        return phase.endswith("phase3") or phase == "aptos_finetune"
+
     def train_one_epoch(
         self,
         loader: DataLoader,
         optimizer: torch.optim.Optimizer,
         criterion: nn.Module,
         criterion_unreduced: nn.Module,
+        scheduler: CosineWarmupScheduler,
+        epoch_index: int,
+        phase: str,
         use_mixup: bool = False,
         use_amp: bool = True,
     ) -> dict:
         self.model.train()
-        self._freeze_backbone_bn()
+        if not self._should_unfreeze_bn(phase):
+            self._freeze_backbone_bn()
 
         amp_on = bool(use_amp and self.device.type == "cuda")
+        use_scaler = self.scaler is not None and amp_on
 
         running_loss = 0.0
         correct = 0
@@ -238,8 +253,10 @@ class Trainer:
         all_preds: list[torch.Tensor] = []
         all_labels: list[torch.Tensor] = []
 
+        num_batches = max(1, len(loader))
         pbar = tqdm(loader, desc="  Train", leave=False)
-        for images, labels in pbar:
+        for batch_idx, (images, labels) in enumerate(pbar):
+            scheduler.step(epoch_index + batch_idx / num_batches)
             images = images.to(self.device, non_blocking=True)
             labels = labels.to(self.device, non_blocking=True)
 
@@ -287,15 +304,12 @@ class Trainer:
                     loss = loss + config.CONSISTENCY_WEIGHT * consistency_loss
 
             if not torch.isfinite(loss).all():
-                logger.warning(
-                    "Non-finite training loss; skipping batch"
-                    + (" (GradScaler updated)." if self._use_grad_scaler and amp_on else ".")
-                )
-                if self._use_grad_scaler and amp_on:
-                    self.scaler.update()
+                logger.warning("Non-finite training loss; skipping batch.")
+                optimizer.zero_grad(set_to_none=True)
                 continue
 
-            if self._use_grad_scaler and amp_on:
+            if use_scaler:
+                assert self.scaler is not None
                 self.scaler.scale(loss).backward()
                 self.scaler.unscale_(optimizer)
                 nn.utils.clip_grad_norm_(
@@ -316,13 +330,13 @@ class Trainer:
             if self.ema is not None:
                 self.ema.update(self.model)
 
-            batch_size = labels_a.size(0)
+            batch_size = labels.size(0)
             running_loss += loss.item() * batch_size
             preds = outputs.argmax(dim=1)
-            correct += (preds == labels_a).sum().item()
+            correct += (preds == labels).sum().item()
             total += batch_size
             all_preds.append(preds.detach())
-            all_labels.append(labels_a.detach())
+            all_labels.append(labels.detach())
 
             pbar.set_postfix(
                 loss=f"{loss.item():.4f}",
@@ -403,7 +417,7 @@ class Trainer:
         }
         if optimizer is not None:
             ckpt["optimizer_state_dict"] = optimizer.state_dict()
-        if scaler is not None and self._use_grad_scaler:
+        if scaler is not None:
             ckpt["scaler_state_dict"] = scaler.state_dict()
         if self.ema is not None:
             ckpt["ema_state_dict"] = self.ema.state_dict()
@@ -434,19 +448,23 @@ class Trainer:
         criterion_unreduced = self._build_criterion(reduction="none").to(self.device)
 
         # Discriminative learning rates
-        if config.USE_DISCRIMINATIVE_LR and phase != "phase1" and phase != "s1_phase1":
+        use_discriminative_lr = (
+            config.USE_DISCRIMINATIVE_LR and phase != "phase1" and phase != "s1_phase1"
+        )
+        if use_discriminative_lr:
             head_params = list(self.model.head.parameters()) + list(
                 self.model.global_pool.parameters()
             )
             backbone_params = [p for p in self.model.backbone.parameters() if p.requires_grad]
+            param_groups = [
+                {"params": backbone_params, "lr": lr, "name": "backbone"},
+                {"params": head_params, "lr": lr * config.HEAD_LR_MULTIPLIER, "name": "head"},
+            ]
+            param_groups = [group for group in param_groups if group["params"]]
+            if not param_groups:
+                raise ValueError(f"No trainable parameters found for phase '{phase}'")
 
-            optimizer = torch.optim.AdamW(
-                [
-                    {"params": backbone_params, "lr": lr},
-                    {"params": head_params, "lr": lr * config.HEAD_LR_MULTIPLIER},
-                ],
-                weight_decay=weight_decay,
-            )
+            optimizer = torch.optim.AdamW(param_groups, weight_decay=weight_decay)
         else:
             optimizer = torch.optim.AdamW(
                 filter(lambda p: p.requires_grad, self.model.parameters()),
@@ -477,29 +495,39 @@ class Trainer:
         for epoch in range(epochs):
             t0 = time.time()
 
-            scheduler.step(epoch)
-            current_lr = optimizer.param_groups[0]["lr"]
-
             train_metrics = self.train_one_epoch(
                 train_loader,
                 optimizer,
                 criterion,
                 criterion_unreduced,
+                scheduler,
+                epoch,
+                phase,
                 use_mixup=use_mixup,
                 use_amp=use_amp,
             )
+            scheduler.step(epoch + 1)
+            current_lr = optimizer.param_groups[0]["lr"]
+            if use_discriminative_lr:
+                lr_text = "LR: " + " ".join(
+                    f"{group.get('name', f'group{idx}')}={group['lr']:.2e}"
+                    for idx, group in enumerate(optimizer.param_groups)
+                )
+            else:
+                lr_text = f"LR: {current_lr:.2e}"
             val_metrics = self.validate(valid_loader, criterion, use_amp=use_amp)
 
             for split, metrics in [("train", train_metrics), ("val", val_metrics)]:
                 self.history[f"{split}_loss"].append(metrics["loss"])
                 self.history[f"{split}_acc"].append(metrics["acc"])
                 self.history[f"{split}_kappa"].append(metrics["kappa"])
+            self.history["phase"].append(phase)
             self.history["lr"].append(current_lr)
 
             elapsed = time.time() - t0
             logger.info(
                 f"Epoch {epoch + 1:02d}/{epochs} ({elapsed:.0f}s) | "
-                f"LR: {current_lr:.2e} | "
+                f"{lr_text} | "
                 f"Train Loss: {train_metrics['loss']:.4f} Acc: {train_metrics['acc']:.4f} "
                 f"QWK: {train_metrics['kappa']:.4f} | "
                 f"Val Loss: {val_metrics['loss']:.4f} Acc: {val_metrics['acc']:.4f} "
@@ -513,7 +541,7 @@ class Trainer:
                     phase,
                     val_metrics,
                     optimizer=optimizer,
-                    scaler=self.scaler if self._use_grad_scaler else None,
+                    scaler=self.scaler,
                 )
 
             if early_stop(val_metrics["kappa"]):
@@ -525,8 +553,10 @@ class Trainer:
 
         return not early_stopped
 
-    def load_best_checkpoint(self, phase: str = "phase3"):
+    def load_best_checkpoint(self, phase: str | None = None):
         """Load the best checkpoint for evaluation / inference."""
+        if phase is None:
+            raise ValueError("phase is required; e.g. 's1_phase3' or 'aptos_finetune'")
         path = os.path.join(
             config.CHECKPOINTS_DIR,
             f"best_model_{phase}.pth",
