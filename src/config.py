@@ -157,7 +157,7 @@ CONSISTENCY_WEIGHT = 0.5
 
 # Exponential Moving Average
 USE_EMA = True
-EMA_DECAY = 0.9999  # Stage 1 (many iterations); Stage 2 uses STAGE2_EMA_DECAY
+EMA_DECAY = 0.999  # Lowered from 0.9999 to account for massive 512 batch size
 STAGE2_EMA_DECAY = 0.999
 
 # ---------------------------------------------------------------------------
