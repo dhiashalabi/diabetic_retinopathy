@@ -109,7 +109,7 @@ export KAGGLE_KEY=your_api_key
 uv run scripts/download_data.py
 
 # Run the full training pipeline
-uv run python train_pipeline.py
+Run the notebooks/03_training.ipynb followed by 03b_aptos_finetuning.ipynb in Jupyter.
 
 # Or quick test (1-2 epochs per phase)
 uv run python train_pipeline.py --dry-run
@@ -134,7 +134,7 @@ The intended path is **`notebooks/03_training.ipynb` → `03b_aptos_finetuning.i
 ```bash
 pip install -e .
 python scripts/download_data.py
-python train_pipeline.py
+Run the notebooks/03_training.ipynb followed by 03b_aptos_finetuning.ipynb in Jupyter.
 jupyter notebook notebooks/
 ```
 
@@ -156,7 +156,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 export KAGGLE_USERNAME=xxx KAGGLE_KEY=yyy
 uv sync
 uv run scripts/download_data.py
-uv run python train_pipeline.py
+Run the notebooks/03_training.ipynb followed by 03b_aptos_finetuning.ipynb in Jupyter.
 ```
 
 ## Usage

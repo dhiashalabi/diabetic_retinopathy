@@ -106,16 +106,12 @@ STAGE1_PHASE2_WD = 1e-4
 STAGE1_PHASE2_UNFREEZE = "blocks[-1:]"
 
 STAGE1_PHASE3_EPOCHS = 15
-STAGE1_PHASE3_LR = 1e-5
+STAGE1_PHASE3_LR = 5e-5
 STAGE1_PHASE3_WD = 5e-4
 
 # Batch sizes tuned for NVIDIA H200 (~141 GB VRAM), EfficientNetV2-S @ 384×384, AMP.
 # If you OOM (e.g. consistency reg + mixup spikes), lower STAGE1_BATCH_SIZE / STAGE2_BATCH_SIZE.
-STAGE1_BATCH_SIZE = 96
-
-# Backward-compatible aliases (used by evaluate.py training curve markers)
-PHASE1_EPOCHS = STAGE1_PHASE1_EPOCHS
-PHASE2_EPOCHS = STAGE1_PHASE2_EPOCHS
+STAGE1_BATCH_SIZE = 512
 
 # ---------------------------------------------------------------------------
 # TRANSFER LEARNING — STAGE 2 (APTOS fine-tuning)
@@ -124,7 +120,7 @@ PHASE2_EPOCHS = STAGE1_PHASE2_EPOCHS
 STAGE2_EPOCHS = 25
 STAGE2_LR = 3e-5
 STAGE2_WEIGHT_DECAY = 1e-3
-STAGE2_BATCH_SIZE = 64  # H200: larger batches OK; backbone BN frozen
+STAGE2_BATCH_SIZE = 128  # H200: larger batches OK; backbone BN frozen
 STAGE2_WARMUP_EPOCHS = 3
 
 # ---------------------------------------------------------------------------
@@ -141,8 +137,8 @@ HEAD_LR_MULTIPLIER = 10.0
 
 # Class balancing
 USE_WEIGHTED_SAMPLER = True
-SAMPLER_POWER = 0.5  # Square-root rebalancing: weight = 1/count^power
-USE_CLASS_WEIGHTED_LOSS = True  # Apply class weights to loss function
+SAMPLER_POWER = 1.0  # Inverse frequency rebalancing for massive mini-batches
+USE_CLASS_WEIGHTED_LOSS = False  # DO NOT apply class weights to loss (prevents gradient explosion when combined with WeightedSampler)
 
 # Loss configuration
 USE_ORDINAL_LOSS = True
@@ -161,7 +157,7 @@ CONSISTENCY_WEIGHT = 0.5
 
 # Exponential Moving Average
 USE_EMA = True
-EMA_DECAY = 0.9999  # Stage 1 (many iterations); Stage 2 uses STAGE2_EMA_DECAY in train_pipeline
+EMA_DECAY = 0.9999  # Stage 1 (many iterations); Stage 2 uses STAGE2_EMA_DECAY
 STAGE2_EMA_DECAY = 0.999
 
 # ---------------------------------------------------------------------------
@@ -183,7 +179,7 @@ else:
     # Leave 2+ cores for the main process / OS; cap to avoid excessive IPC churn
     NUM_WORKERS = min(14, _cpu_count - 2) if _cpu_count >= 16 else min(8, max(2, _cpu_count // 2))
 
-PREFETCH_FACTOR = 4
+PREFETCH_FACTOR = 2
 PIN_MEMORY = True
 
 # Optional: torch.compile on CUDA (Hopper H100/H200, Ada, Ampere+); first epoch may compile
