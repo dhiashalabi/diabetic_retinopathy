@@ -1,0 +1,10 @@
+{
+  "notebook_stage": "03b_aptos_start",
+  "AMP_DTYPE": "bfloat16",
+  "_updated_at": "2026-05-04T09:54:23Z",
+  "stage": "eyepacs",
+  "notebook": "03_training",
+  "MODEL_NAME": "tf_efficientnetv2_s.in21k_ft_in1k",
+  "STAGE1_BATCH_SIZE": 512,
+  "PREPROCESSING_CACHE_VERSION": "v8"
+}
