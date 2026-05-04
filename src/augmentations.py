@@ -17,7 +17,7 @@ from albumentations.pytorch import ToTensorV2
 from . import config
 
 
-def get_light_train_transforms(img_size: int = config.IMG_SIZE) -> A.Compose:
+def get_light_train_transforms(img_size: int = config.STAGE1_IMG_SIZE) -> A.Compose:
     """
     Mild augmentation for Phase 1 (head-only training).
 
@@ -51,7 +51,7 @@ def get_light_train_transforms(img_size: int = config.IMG_SIZE) -> A.Compose:
 get_train_transforms_light = get_light_train_transforms
 
 
-def get_train_transforms(img_size: int = config.IMG_SIZE) -> A.Compose:
+def get_train_transforms(img_size: int = config.STAGE1_IMG_SIZE) -> A.Compose:
     """
     Aggressive augmentation for Phase 2/3 fine-tuning.
 
@@ -125,7 +125,7 @@ def get_train_transforms(img_size: int = config.IMG_SIZE) -> A.Compose:
     )
 
 
-def get_valid_transforms(img_size: int = config.IMG_SIZE) -> A.Compose:
+def get_valid_transforms(img_size: int = config.STAGE2_IMG_SIZE) -> A.Compose:
     """Deterministic pipeline for validation and test sets."""
     return A.Compose(
         [
@@ -136,7 +136,7 @@ def get_valid_transforms(img_size: int = config.IMG_SIZE) -> A.Compose:
     )
 
 
-def get_tta_transforms(img_size: int = config.IMG_SIZE) -> list[A.Compose]:
+def get_tta_transforms(img_size: int = config.STAGE2_IMG_SIZE) -> list[A.Compose]:
     """
     Test-Time Augmentation (TTA) transforms for boosting accuracy.
 

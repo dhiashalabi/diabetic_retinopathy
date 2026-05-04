@@ -53,9 +53,9 @@ def load_model(checkpoint_path: str | None = None, device: str = "auto"):
 
 def predict_image(image: np.ndarray, model, device) -> tuple[np.ndarray, dict]:
     """Run prediction on a single image (numpy RGB from Gradio)."""
-    preprocessed = preprocess_image(image, img_size=config.IMG_SIZE)
+    preprocessed = preprocess_image(image, img_size=config.STAGE2_IMG_SIZE)
 
-    transform = get_valid_transforms(config.IMG_SIZE)
+    transform = get_valid_transforms(config.STAGE2_IMG_SIZE)
     tensor = transform(image=preprocessed)["image"].unsqueeze(0).to(device)
 
     with torch.no_grad():
