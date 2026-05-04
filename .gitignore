@@ -32,9 +32,9 @@ dataset/preprocessed_*/*
 *.zip
 
 # Dataset — APTOS (download via Kaggle)
-dataset_aptos/train_images/
-dataset_aptos/test_images/
-dataset_aptos/preprocessed_*/
+dataset_aptos/*
+!dataset_aptos/preprocessed_*/
+dataset_aptos/preprocessed_*/*
 !dataset_aptos/preprocessed_*/cache_meta.json
 
 # Virtual environments
