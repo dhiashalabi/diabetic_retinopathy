@@ -5,5 +5,9 @@
   "MODEL_NAME": "tf_efficientnetv2_s.in21k_ft_in1k",
   "STAGE1_BATCH_SIZE": 512,
   "PREPROCESSING_CACHE_VERSION": "v8",
-  "_updated_at": "2026-05-08T06:20:47Z"
+  "_updated_at": "2026-05-08T11:03:46Z",
+  "notebook_stage": "03b_aptos_start",
+  "stage_aptos_finetune": true,
+  "checkpoint_aptos": "/teamspace/studios/this_studio/diabetic_retinopathy/outputs/checkpoints/best_model_aptos_finetune.pth",
+  "STAGE2_BATCH_SIZE": 128
 }
