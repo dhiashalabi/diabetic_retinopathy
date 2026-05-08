@@ -106,7 +106,7 @@ def apply_circular_mask(img: np.ndarray) -> np.ndarray:
 
 def preprocess_image(
     img: np.ndarray,
-    img_size: int = config.IMG_SIZE,
+    img_size: int = config.STAGE2_IMG_SIZE,
     use_ben_graham: bool = config.USE_BEN_GRAHAM,
     use_clahe: bool = True,
     use_crop: bool = True,
@@ -157,7 +157,7 @@ def preprocess_image(
     return img
 
 
-def load_and_preprocess(image_path: str, img_size: int = config.IMG_SIZE, **kwargs) -> np.ndarray:
+def load_and_preprocess(image_path: str, img_size: int = config.STAGE2_IMG_SIZE, **kwargs) -> np.ndarray:
     """Convenience: read an image file from disk and preprocess it."""
     img = cv2.imread(image_path)
     if img is None:

@@ -152,8 +152,10 @@ def compute_sample_weights(labels: np.ndarray, power: float | None = None) -> np
 # -----------------------------------------------------------------------
 
 
-def _get_cache_dir(dataset_name: str, img_size: int = config.IMG_SIZE) -> str:
+def _get_cache_dir(dataset_name: str, img_size: int | None = None) -> str:
     """Get the path to the preprocessed image cache directory."""
+    if img_size is None:
+        img_size = config.resolve_img_size(dataset_name)
     base = config.DATA_DIR if dataset_name == "eyepacs" else config.APTOS_DATA_DIR
     return os.path.join(base, f"preprocessed_{img_size}_{dataset_name}")
 
@@ -180,13 +182,13 @@ class DRDataset(Dataset):
         dataset_name: str,
         transform=None,
         preprocessing: bool = True,
-        img_size: int = config.IMG_SIZE,
+        img_size: int | None = None,
         fail_on_missing: bool = False,
     ):
         self.df = df.reset_index(drop=True)
         self.dataset_name = dataset_name
         self.transform = transform
-        self.img_size = img_size
+        self.img_size = img_size if img_size is not None else config.resolve_img_size(dataset_name)
         self.fail_on_missing = fail_on_missing
 
         # --- CACHE FIX: Auto-detect and use preprocessed cache ---
@@ -281,18 +283,22 @@ def create_dataloaders(
     preprocessing: bool = True,
     use_sampler: bool = config.USE_WEIGHTED_SAMPLER,
     sampler_seed: int | None = config.SEED,
+    img_size: int | None = None,
 ) -> dict[str, DataLoader]:
+    resolved_img = img_size if img_size is not None else config.resolve_img_size(dataset_name)
     train_ds = DRDataset(
         train_df,
         dataset_name=dataset_name,
         transform=train_transform,
         preprocessing=preprocessing,
+        img_size=resolved_img,
     )
     valid_ds = DRDataset(
         valid_df,
         dataset_name=dataset_name,
         transform=valid_transform,
         preprocessing=preprocessing,
+        img_size=resolved_img,
     )
 
     sampler = None
@@ -346,6 +352,7 @@ def create_dataloaders(
             dataset_name=dataset_name,
             transform=valid_transform,
             preprocessing=preprocessing,
+            img_size=resolved_img,
         )
         loaders["test"] = DataLoader(
             test_ds,
@@ -361,12 +368,14 @@ def preprocess_images_to_cache(
     df: pd.DataFrame,
     dataset_name: str,
     cache_dir: str | None = None,
-    img_size: int = config.IMG_SIZE,
+    img_size: int | None = None,
     overwrite: bool = False,
     cache_image_format: str = config.CACHE_IMAGE_FORMAT,
     cache_image_quality: int = config.CACHE_IMAGE_QUALITY,
 ) -> str:
     """Preprocess images and save to cache directory for fast loading."""
+    if img_size is None:
+        img_size = config.resolve_img_size(dataset_name)
     cache_image_format = cache_image_format.lower().lstrip(".")
     if cache_image_format not in {"jpg", "jpeg", "png", "webp"}:
         raise ValueError("Unsupported cache_image_format. Use one of: jpg, jpeg, png, webp")

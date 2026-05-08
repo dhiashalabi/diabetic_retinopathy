@@ -23,7 +23,7 @@ logger = get_logger(__name__)
 def export_to_onnx(
     checkpoint_path: str | None = None,
     output_path: str | None = None,
-    img_size: int = config.IMG_SIZE,
+    img_size: int = config.STAGE2_IMG_SIZE,
     opset_version: int = 17,
 ) -> str:
     """
@@ -175,15 +175,15 @@ def test_onnx_inference(
         if img is None:
             raise FileNotFoundError(f"Cannot read image: {image_path}")
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        preprocessed = preprocess_image(img, img_size=config.IMG_SIZE)
-        transform = get_valid_transforms(config.IMG_SIZE)
+        preprocessed = preprocess_image(img, img_size=config.STAGE2_IMG_SIZE)
+        transform = get_valid_transforms(config.STAGE2_IMG_SIZE)
         tensor = transform(image=preprocessed)["image"].unsqueeze(0).numpy()
     else:
         tensor = np.random.randn(
             1,
             3,
-            config.IMG_SIZE,
-            config.IMG_SIZE,
+            config.STAGE2_IMG_SIZE,
+            config.STAGE2_IMG_SIZE,
         ).astype(np.float32)
 
     logits = session.run(None, {"input": tensor})[0]

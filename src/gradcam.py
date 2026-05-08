@@ -328,7 +328,7 @@ def visualize_gradcam_grid(
 
 def _resolve_aptos_image_path(image_id: str, images_dir: str) -> str | None:
     """Try preprocessed cache first, then ``images_dir``, with common extensions."""
-    cache_dir = os.path.join(config.APTOS_DATA_DIR, f"preprocessed_{config.IMG_SIZE}_aptos")
+    cache_dir = os.path.join(config.APTOS_DATA_DIR, f"preprocessed_{config.STAGE2_IMG_SIZE}_aptos")
     for base in (cache_dir, images_dir):
         for ext in (".jpeg", ".jpg", ".png", ".JPEG", ".JPG"):
             p = os.path.join(base, str(image_id) + ext)
@@ -350,7 +350,7 @@ class GradCAMExplainer:
         model: nn.Module,
         device: torch.device,
         class_names: list[str] = config.CLASS_NAMES,
-        img_size: int = config.IMG_SIZE,
+        img_size: int = config.STAGE2_IMG_SIZE,
     ):
         self.model = model
         self.device = device

@@ -5,5 +5,5 @@
   "img_size": 384,
   "num_unique_images": 5267,
   "source_images_dir": "/teamspace/studios/this_studio/diabetic_retinopathy/dataset/resized_train_cropped/resized_train_cropped",
-  "version": "v7"
+  "version": "v8"
 }

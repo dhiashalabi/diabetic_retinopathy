@@ -1,6 +1,16 @@
 """
 Comprehensive evaluation suite for the DR classifier.
 
+EVAL_CONTRACT (report metrics consistently):
+- **Trainer checkpoints** optimize validation QWK from **argmax** on logits
+  (see ``Trainer.validate``) — not threshold-TTA QWK.
+- **This module** can report higher QWK using **validation-fit decision thresholds**
+  (``optimize_qwk_thresholds`` / ``apply_qwk_thresholds``) and optional **TTA**
+  (``predict_with_tta`` / ``full_evaluation(..., use_tta=True)``). Always state
+  whether TTA was on and which checkpoint was evaluated.
+- **Splits / seed** follow ``config.SEED`` and ``load_and_split_dataframe`` in
+  the training notebooks unless you document otherwise.
+
 Metrics:
 - Quadratic Weighted Kappa (primary clinical metric)
 - Per-class Precision / Recall / F1
@@ -142,9 +152,15 @@ def predict_ensemble(
     model: nn.Module,
     loader: DataLoader,
     device: torch.device,
-    phases: list[str] = ["phase2", "phase3"],
+    phases: list[str] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Average predictions from multiple checkpoint phases."""
+    """Average predictions from multiple checkpoint phases.
+
+    Default ``phases`` matches Stage-1 notebook checkpoints (``s1_phase2``,
+    ``s1_phase3``). Pass an explicit list for other workflows (e.g. APTOS-only).
+    """
+    if phases is None:
+        phases = ["s1_phase2", "s1_phase3"]
     all_probas = []
     y_true = None
 
@@ -565,7 +581,7 @@ def predict_single_image(
     image_path: str,
     device: torch.device,
     class_names: list[str] = config.CLASS_NAMES,
-    img_size: int = config.IMG_SIZE,
+    img_size: int = config.STAGE2_IMG_SIZE,
     show: bool = True,
     save_path: str | None = None,
 ) -> dict:
@@ -651,7 +667,7 @@ def predict_with_tta(
     dataset_df,
     dataset_name: str,
     device: torch.device,
-    img_size: int = config.IMG_SIZE,
+    img_size: int | None = None,
     batch_size: int = 32,
     max_tta_views: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -665,6 +681,9 @@ def predict_with_tta(
     Returns (y_true, y_pred, y_proba).
     """
     from .dataset import DRDataset
+
+    if img_size is None:
+        img_size = config.resolve_img_size(dataset_name)
 
     model.eval()
     tta_transforms = get_tta_transforms(img_size)

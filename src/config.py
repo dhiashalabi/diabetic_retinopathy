@@ -66,7 +66,23 @@ CLASS_NAMES = ["No_DR", "Mild", "Moderate", "Severe", "Proliferative_DR"]
 # Training defaults below are sized for: NVIDIA H200 (~141 GB VRAM, ~1979 TFLOPS
 # peak tensor spec), 16 CPUs. Adjust batch sizes if your machine differs.
 SEED = 42
-IMG_SIZE = 384
+
+# Per-stage input resolution (EyePACS pre-train vs APTOS fine-tune / deploy).
+STAGE1_IMG_SIZE = 384
+STAGE2_IMG_SIZE = 512
+# Backward-compatible alias: same as Stage 2 (APTOS / ONNX / Gradio).
+IMG_SIZE = STAGE2_IMG_SIZE
+
+
+def resolve_img_size(dataset_name: str) -> int:
+    """EyePACS uses Stage-1 resolution; APTOS uses Stage-2 (higher detail)."""
+    if dataset_name == "aptos":
+        return STAGE2_IMG_SIZE
+    if dataset_name == "eyepacs":
+        return STAGE1_IMG_SIZE
+    raise ValueError(f"Unknown dataset_name for resolve_img_size: {dataset_name!r}")
+
+
 IMG_MEAN = [0.485, 0.456, 0.406]
 IMG_STD = [0.229, 0.224, 0.225]
 MODEL_NAME = "tf_efficientnetv2_s.in21k_ft_in1k"
@@ -86,7 +102,8 @@ TEST_RATIO = 0.15
 # Preprocessing cache
 # ---------------------------------------------------------------------------
 USE_PREPROCESSED_CACHE = True
-PREPROCESSING_CACHE_VERSION = "v7"
+# Bump when cache layout, STAGE1/STAGE2 sizes, or preprocessing pipeline changes.
+PREPROCESSING_CACHE_VERSION = "v8"
 CACHE_IMAGE_FORMAT = "png"
 CACHE_IMAGE_QUALITY = 95
 CACHE_PNG_COMPRESSION = 3
@@ -120,7 +137,8 @@ STAGE1_BATCH_SIZE = 512
 STAGE2_EPOCHS = 25
 STAGE2_LR = 3e-5
 STAGE2_WEIGHT_DECAY = 1e-3
-STAGE2_BATCH_SIZE = 128  # H200: larger batches OK; backbone BN frozen
+# 512² inputs use more VRAM than 384²; reduce batch if you OOM (H200 can often raise this).
+STAGE2_BATCH_SIZE = 128
 STAGE2_WARMUP_EPOCHS = 3
 
 # ---------------------------------------------------------------------------
