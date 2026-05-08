@@ -26,11 +26,6 @@ import argparse
 import os
 import sys
 
-# Project root must be on sys.path
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
-
 import numpy as np
 import pandas as pd
 import torch
@@ -39,10 +34,15 @@ from tqdm import tqdm
 
 from src import config
 from src.augmentations import get_valid_transforms
-from src.dataset import DRDataset, load_and_split_dataframe
+from src.dataset import DRDataset
 from src.evaluate import _eval_autocast, _softmax_probs_numpy
-from src.model import DRModel, ModelEMA, build_model
+from src.model import DRModel, build_model
 from src.utils import get_device, seed_everything
+
+# Project root must be on sys.path
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 
 def run_inference_on_eyepacs(
