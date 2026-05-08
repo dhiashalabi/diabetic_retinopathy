@@ -171,6 +171,35 @@ def get_tta_transforms(img_size: int = config.STAGE2_IMG_SIZE) -> list[A.Compose
     ]
 
 
+def get_multiscale_tta_transforms(
+    sizes: list[int] | None = None,
+) -> list[A.Compose]:
+    """
+    Multi-scale Test-Time Augmentation (TTA) transforms.
+
+    Combines D4 symmetry (8 geometric views) across multiple resolutions.
+    Retinal lesions appear at different scales, so multi-resolution
+    averaging captures both fine and coarse features.
+
+    Parameters
+    ----------
+    sizes : list[int], optional
+        Image sizes to use.  Defaults to ``config.MULTISCALE_TTA_SIZES``.
+
+    Returns
+    -------
+    list[A.Compose]
+        Combined list of transforms across all scales.
+    """
+    if sizes is None:
+        sizes = config.MULTISCALE_TTA_SIZES
+
+    all_transforms = []
+    for size in sizes:
+        all_transforms.extend(get_tta_transforms(img_size=size))
+    return all_transforms
+
+
 def mixup_data(
     images: torch.Tensor,
     labels: torch.Tensor,

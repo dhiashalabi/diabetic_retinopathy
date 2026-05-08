@@ -6,13 +6,13 @@ Automated detection and grading of Diabetic Retinopathy (DR) from retinal fundus
 
 Diabetic Retinopathy is the leading cause of preventable blindness. Early detection through automated screening can significantly reduce vision loss. This project classifies retinal fundus images into 5 severity levels:
 
-| Grade | Name | Description |
-|-------|------|-------------|
-| 0 | No DR | No signs of diabetic retinopathy |
-| 1 | Mild | Microaneurysms only |
-| 2 | Moderate | More than just microaneurysms |
-| 3 | Severe | Extensive intraretinal haemorrhages |
-| 4 | Proliferative DR | Neovascularisation or vitreous/preretinal haemorrhage |
+| Grade | Name             | Description                                           |
+| ----- | ---------------- | ----------------------------------------------------- |
+| 0     | No DR            | No signs of diabetic retinopathy                      |
+| 1     | Mild             | Microaneurysms only                                   |
+| 2     | Moderate         | More than just microaneurysms                         |
+| 3     | Severe           | Extensive intraretinal haemorrhages                   |
+| 4     | Proliferative DR | Neovascularisation or vitreous/preretinal haemorrhage |
 
 ## Dataset
 
@@ -23,6 +23,7 @@ Diabetic Retinopathy is the leading cause of preventable blindness. Early detect
 ## Key Design Decisions
 
 ### High Accuracy Strategies
+
 - **EfficientNetV2-S** backbone (ImageNet-21K pre-trained) with GeM pooling and custom two-layer head
 - **Two-stage transfer learning**: pre-train on EyePACS (3-phase progressive unfreezing), fine-tune on APTOS
 - **CLAHE enhancement**: boosts local contrast to reveal microaneurysms and haemorrhages
@@ -32,6 +33,7 @@ Diabetic Retinopathy is the leading cause of preventable blindness. Early detect
 - **Label smoothing** (0.1): prevents overconfident predictions
 
 ### Professional Dataset Balancing
+
 - **Patient-level stratified splitting**: prevents data leakage (both eyes stay in the same split)
 - **WeightedRandomSampler**: produces balanced mini-batches despite 73%/5%/15%/2%/5% imbalance
 - **Class-conditional Mixup**: linear interpolation while protecting rare/severe class features
@@ -39,6 +41,7 @@ Diabetic Retinopathy is the leading cause of preventable blindness. Early detect
 - **Phase-aware augmentation**: light transforms for head-only training, full augmentation for fine-tuning
 
 ### Clinical-Grade Evaluation
+
 - **Quadratic Weighted Kappa (QWK)**: primary metric, penalises distant misclassifications more heavily
 - **Threshold optimisation**: learn optimal thresholds on validation set for improved grading
 - **Per-class ROC curves** with AUC
@@ -59,11 +62,12 @@ diabetic_retinopathy/
 │   ├── 01_eda.ipynb                   # Exploratory data analysis (EyePACS + APTOS)
 │   ├── 02_preprocessing.ipynb         # Preprocessing pipeline demo
 │   ├── 03_training.ipynb              # Stage 1: EyePACS pre-training (3-phase)
-│   ├── 03b_aptos_finetuning.ipynb     # Stage 2: APTOS fine-tuning + threshold opt
+│   ├── 03b_aptos_finetuning.ipynb     # Stage 2: APTOS fine-tuning (single model)
 │   ├── 04_evaluation.ipynb            # Full evaluation suite + TTA + thresholds
 │   ├── 05_gradcam.ipynb               # Grad-CAM explainability (APTOS images)
 │   ├── 06_model_comparison.ipynb      # EfficientNetV2-S vs ConvNeXt-Base vs V2-M
-│   └── 07_demo.ipynb                  # Gradio web demo
+│   ├── 07_demo.ipynb                  # Gradio web demo
+│   └── 08_aptos_kfold_ensemble.ipynb  # 5-fold ensemble fine-tuning + evaluation
 ├── src/
 │   ├── __init__.py                    # Package init
 │   ├── config.py                      # Hyperparameters and paths
@@ -80,7 +84,9 @@ diabetic_retinopathy/
 │   ├── data_manager.py                # Unified dataset download/setup
 │   └── app.py                         # Gradio web demo module
 ├── scripts/
-│   └── download_data.py               # CLI dataset downloader
+│   ├── download_data.py               # CLI dataset downloader
+│   ├── clean_eyepacs_labels.py        # Noisy EyePACS label cleaning
+│   └── train_kfold.py                 # CLI K-fold ensemble training
 ├── outputs/
 │   ├── checkpoints/                   # Model weights (.pth + .onnx)
 │   ├── figures/                       # Plots and visualisations
@@ -169,16 +175,41 @@ python train_pipeline.py --dry-run     # Quick test (1-2 epochs)
 python train_pipeline.py --stage2-only # Skip Stage 1 (needs existing checkpoint)
 ```
 
-### Notebooks (run in order)
+### Complete Training Workflow
+
+Follow these steps in order for optimal results:
+
+#### Phase 1: Exploration & Initial Training
 
 1. **`01_eda.ipynb`** — Explore both datasets (EyePACS + APTOS)
 2. **`02_preprocessing.ipynb`** — Visualise the preprocessing pipeline
 3. **`03_training.ipynb`** — Stage 1: EyePACS pre-training (3-phase progressive unfreezing)
-3b. **`03b_aptos_finetuning.ipynb`** — Stage 2: APTOS fine-tuning + threshold optimization
-4. **`04_evaluation.ipynb`** — Full evaluation + TTA comparison + threshold optimization
-5. **`05_gradcam.ipynb`** — Grad-CAM explanations on APTOS images
-6. **`06_model_comparison.ipynb`** — Benchmark EfficientNetV2-S vs ConvNeXt-Base vs V2-M
-7. **`07_demo.ipynb`** — Launch the Gradio web demo
+4. **`03b_aptos_finetuning.ipynb`** — Stage 2: APTOS fine-tuning (single model) + threshold optimization
+5. **`04_evaluation.ipynb`** — Full evaluation + TTA comparison + threshold optimization
+
+#### Phase 2: Data Cleaning (optional but recommended)
+
+6. **`scripts/clean_eyepacs_labels.py`** — Clean noisy EyePACS labels using the trained model
+
+   ```bash
+   python scripts/clean_eyepacs_labels.py
+   ```
+
+   The cleaned CSV is **auto-detected** — no config change needed.
+
+7. **Re-run `03_training.ipynb`** — Retrain Stage 1 on cleaned EyePACS data
+
+#### Phase 3: K-Fold Ensemble (for maximum QWK)
+
+8. **`08_aptos_kfold_ensemble.ipynb`** — 5-fold stratified ensemble fine-tuning + evaluation
+   - Trains 5 models on 5 different APTOS splits, starting from the Stage 1 checkpoint
+   - Averages predictions across folds with multi-scale TTA + threshold optimization
+
+#### Phase 4: Analysis & Demo
+
+9. **`05_gradcam.ipynb`** — Grad-CAM explanations on APTOS images
+10. **`06_model_comparison.ipynb`** — Benchmark EfficientNetV2-S vs ConvNeXt-Base vs V2-M
+11. **`07_demo.ipynb`** — Launch the Gradio web demo
 
 ## Development
 

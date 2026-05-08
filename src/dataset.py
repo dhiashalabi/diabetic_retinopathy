@@ -18,7 +18,7 @@ import cv2
 import numpy as np
 import pandas as pd
 import torch
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.utils.class_weight import compute_class_weight
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
@@ -51,7 +51,13 @@ def load_and_split_dataframe(
         image, level, patient_id, source
     """
     if dataset_name == "eyepacs":
-        csv_path = config.EYEPACS_LABELS_CSV
+        # Auto-detect: use cleaned labels if the file exists on disk
+        if os.path.isfile(config.EYEPACS_CLEANED_LABELS_CSV):
+            csv_path = config.EYEPACS_CLEANED_LABELS_CSV
+            _logger.info("Auto-detected CLEANED EyePACS labels: %s", csv_path)
+        else:
+            csv_path = config.EYEPACS_LABELS_CSV
+            _logger.info("Using original EyePACS labels: %s", csv_path)
     elif dataset_name == "aptos":
         csv_path = config.APTOS_LABELS_CSV
     else:
@@ -117,6 +123,76 @@ def load_and_split_dataframe(
     assert set(valid_df["patient_id"]) & set(test_df["patient_id"]) == set()
 
     return train_df, valid_df, test_df
+
+
+def load_and_split_kfold(
+    dataset_name: str,
+    n_splits: int = config.KFOLD_N_SPLITS,
+    test_ratio: float = config.TEST_RATIO,
+    seed: int = config.KFOLD_SEED,
+) -> tuple[pd.DataFrame, list[tuple[pd.DataFrame, pd.DataFrame]]]:
+    """
+    Load labels CSV and split into K folds for cross-validation.
+
+    First holds out a fixed test set (using ``test_ratio``), then splits
+    the remainder into ``n_splits`` train/validation folds using
+    ``StratifiedKFold``.
+
+    Returns
+    -------
+    test_df : pd.DataFrame
+        Held-out test set (same across all folds).
+    folds : list[tuple[pd.DataFrame, pd.DataFrame]]
+        List of (train_df, valid_df) for each fold.
+    """
+    if dataset_name != "aptos":
+        raise ValueError("K-fold splitting is only supported for APTOS dataset")
+
+    csv_path = config.APTOS_LABELS_CSV
+    if not os.path.isfile(csv_path):
+        raise FileNotFoundError(f"Labels CSV missing: {csv_path}. Please download the dataset.")
+
+    df = pd.read_csv(csv_path)
+
+    # Clean up extra index columns
+    cols_to_drop = [c for c in df.columns if c.startswith("Unnamed")]
+    df = df.drop(columns=cols_to_drop, errors="ignore")
+
+    # Standardize column names
+    if "id_code" in df.columns and "diagnosis" in df.columns:
+        df = df.rename(columns={"id_code": "image", "diagnosis": "level"})
+
+    df["source"] = dataset_name
+    df["patient_id"] = df["image"]  # APTOS images are independent
+    df["patient_id"] = df["patient_id"].astype(str)
+
+    # --- Hold out a fixed test set first ---
+    trainval_df, test_df = train_test_split(
+        df,
+        test_size=test_ratio,
+        random_state=seed,
+        stratify=df["level"],
+    )
+    trainval_df = trainval_df.reset_index(drop=True)
+    test_df = test_df.reset_index(drop=True)
+
+    # --- K-Fold split on the remaining train+val data ---
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+    folds = []
+    for train_idx, val_idx in skf.split(trainval_df, trainval_df["level"]):
+        fold_train = trainval_df.iloc[train_idx].reset_index(drop=True)
+        fold_valid = trainval_df.iloc[val_idx].reset_index(drop=True)
+        folds.append((fold_train, fold_valid))
+
+    _logger.info(
+        "K-fold split: %d folds, test=%d, per-fold train≈%d, val≈%d",
+        n_splits,
+        len(test_df),
+        len(folds[0][0]) if folds else 0,
+        len(folds[0][1]) if folds else 0,
+    )
+
+    return test_df, folds
 
 
 # -----------------------------------------------------------------------

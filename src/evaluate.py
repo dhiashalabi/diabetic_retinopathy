@@ -670,6 +670,7 @@ def predict_with_tta(
     img_size: int | None = None,
     batch_size: int = 32,
     max_tta_views: int | None = None,
+    use_multiscale: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Predict with Test-Time Augmentation by averaging softmax probabilities
@@ -677,6 +678,9 @@ def predict_with_tta(
 
     ``max_tta_views`` — if set, use only the first N transforms from
     ``get_tta_transforms`` (e.g. 4 for a faster TTA ablation).
+
+    ``use_multiscale`` — if True, use multi-scale TTA (multiple resolutions)
+    instead of single-scale D4 TTA.
 
     Returns (y_true, y_pred, y_proba).
     """
@@ -686,7 +690,13 @@ def predict_with_tta(
         img_size = config.resolve_img_size(dataset_name)
 
     model.eval()
-    tta_transforms = get_tta_transforms(img_size)
+    if use_multiscale:
+        from .augmentations import get_multiscale_tta_transforms
+
+        tta_transforms = get_multiscale_tta_transforms()
+    else:
+        tta_transforms = get_tta_transforms(img_size)
+
     if max_tta_views is not None:
         tta_transforms = tta_transforms[:max_tta_views]
 
@@ -723,6 +733,125 @@ def predict_with_tta(
             y_true = np.concatenate(labels_list)
 
     y_proba = np.mean(all_probs_per_tta, axis=0)
+    y_pred = y_proba.argmax(axis=1)
+
+    return y_true, y_pred, y_proba
+
+
+# -----------------------------------------------------------------------
+# K-Fold Ensemble Prediction
+# -----------------------------------------------------------------------
+
+
+@torch.no_grad()
+def predict_kfold_ensemble(
+    model: nn.Module,
+    dataset_df,
+    dataset_name: str,
+    device: torch.device,
+    n_folds: int = config.KFOLD_N_SPLITS,
+    use_tta: bool = True,
+    use_multiscale_tta: bool = False,
+    batch_size: int = 32,
+    checkpoint_dir: str | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Average predictions from K-fold trained models.
+
+    For each fold, loads the best checkpoint and runs inference (optionally
+    with TTA). Final probabilities are the mean across all K models.
+
+    This is the highest-accuracy evaluation mode: K-fold ensembling
+    smooths out individual model errors and drastically boosts QWK
+    because it suppresses extreme wrong guesses (quadratic penalty).
+
+    Parameters
+    ----------
+    model : nn.Module
+        Model architecture (weights will be loaded from checkpoints).
+    dataset_df : pd.DataFrame
+        DataFrame with 'image' and 'level' columns.
+    dataset_name : str
+        Dataset name ('aptos').
+    device : torch.device
+        Target device.
+    n_folds : int
+        Number of folds.
+    use_tta : bool
+        Whether to use TTA for each fold's predictions.
+    use_multiscale_tta : bool
+        Whether to use multi-scale TTA (ignored if ``use_tta=False``).
+    batch_size : int
+        Batch size for inference.
+    checkpoint_dir : str, optional
+        Directory containing fold checkpoints. Defaults to
+        ``config.KFOLD_CHECKPOINTS_DIR``.
+
+    Returns
+    -------
+    (y_true, y_pred, y_proba) where y_proba is the mean across folds.
+    """
+    if checkpoint_dir is None:
+        checkpoint_dir = config.KFOLD_CHECKPOINTS_DIR
+
+    all_fold_probas = []
+    y_true = None
+
+    for fold_idx in range(n_folds):
+        ckpt_path = os.path.join(checkpoint_dir, f"best_model_fold_{fold_idx}.pth")
+        if not os.path.exists(ckpt_path):
+            print(f"  ⚠ Fold {fold_idx} checkpoint not found at {ckpt_path}, skipping.")
+            continue
+
+        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model_state_dict"])
+        print(
+            f"  Fold {fold_idx}: loaded checkpoint "
+            f"(epoch {ckpt.get('epoch', '?')}, "
+            f"val QWK={ckpt.get('metrics', {}).get('kappa', '?')})"
+        )
+
+        if use_tta:
+            yt, _, yp = predict_with_tta(
+                model,
+                dataset_df,
+                dataset_name,
+                device,
+                batch_size=batch_size,
+                use_multiscale=use_multiscale_tta,
+            )
+        else:
+            from .augmentations import get_valid_transforms
+            from .dataset import DRDataset
+
+            img_size = config.resolve_img_size(dataset_name)
+            ds = DRDataset(
+                dataset_df,
+                dataset_name=dataset_name,
+                transform=get_valid_transforms(img_size),
+                preprocessing=True,
+                img_size=img_size,
+            )
+            loader = DataLoader(
+                ds,
+                batch_size=batch_size,
+                shuffle=False,
+                num_workers=config.NUM_WORKERS,
+                pin_memory=config.PIN_MEMORY,
+            )
+            yt, _, yp = predict(model, loader, device)
+
+        all_fold_probas.append(yp)
+        if y_true is None:
+            y_true = yt
+
+    if not all_fold_probas:
+        raise ValueError(
+            f"No fold checkpoints found in {checkpoint_dir}. Run K-fold training first."
+        )
+
+    print(f"\n  Ensembling {len(all_fold_probas)} fold predictions...")
+    y_proba = np.mean(all_fold_probas, axis=0)
     y_pred = y_proba.argmax(axis=1)
 
     return y_true, y_pred, y_proba

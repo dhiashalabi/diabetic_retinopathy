@@ -226,7 +226,11 @@ class Trainer:
     @staticmethod
     def _should_unfreeze_bn(phase: str) -> bool:
         """Allow BatchNorm stats to adapt during final unfreeze phases."""
-        return phase.endswith("phase3") or phase == "aptos_finetune"
+        return (
+            phase.endswith("phase3")
+            or phase == "aptos_finetune"
+            or phase.startswith("fold_")  # K-fold ensemble fine-tuning
+        )
 
     def train_one_epoch(
         self,

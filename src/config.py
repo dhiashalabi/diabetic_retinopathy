@@ -43,6 +43,7 @@ _images_candidate = os.path.join(DATA_DIR, "resized_train_cropped")
 _images_nested = os.path.join(_images_candidate, "resized_train_cropped")
 EYEPACS_IMAGES_DIR = _images_nested if os.path.isdir(_images_nested) else _images_candidate
 EYEPACS_LABELS_CSV = os.path.join(DATA_DIR, "trainLabels_cropped.csv")
+EYEPACS_CLEANED_LABELS_CSV = os.path.join(DATA_DIR, "trainLabels_cropped_cleaned.csv")
 
 # APTOS structure
 APTOS_IMAGES_DIR = os.path.join(APTOS_DATA_DIR, "train_images")
@@ -50,6 +51,7 @@ APTOS_LABELS_CSV = os.path.join(APTOS_DATA_DIR, "train.csv")
 
 OUTPUTS_DIR = os.path.join(PROJECT_ROOT, "outputs")
 CHECKPOINTS_DIR = os.path.join(OUTPUTS_DIR, "checkpoints")
+KFOLD_CHECKPOINTS_DIR = os.path.join(OUTPUTS_DIR, "kfold_checkpoints")
 FIGURES_DIR = os.path.join(OUTPUTS_DIR, "figures")
 LOGS_DIR = os.path.join(OUTPUTS_DIR, "logs")
 RUN_MANIFEST_PATH = os.path.join(LOGS_DIR, "run_manifest.json")
@@ -179,6 +181,28 @@ EMA_DECAY = 0.999  # Lowered from 0.9999 to account for massive 512 batch size
 STAGE2_EMA_DECAY = 0.99
 
 # ---------------------------------------------------------------------------
+# K-Fold Ensemble (APTOS fine-tuning)
+# ---------------------------------------------------------------------------
+KFOLD_N_SPLITS = 5
+KFOLD_SEED = SEED  # Reproducible fold assignments
+
+# ---------------------------------------------------------------------------
+# EyePACS noisy-label cleaning
+# ---------------------------------------------------------------------------
+# Remove EyePACS samples where |model_prediction - label| >= threshold.
+# Conservative threshold of 2 avoids removing legitimate borderline cases.
+EYEPACS_CLEANING_THRESHOLD = 2
+# Auto-detection: if EYEPACS_CLEANED_LABELS_CSV exists on disk, it is used
+# automatically by load_and_split_dataframe(). No manual flag needed.
+
+# ---------------------------------------------------------------------------
+# Multi-scale TTA
+# ---------------------------------------------------------------------------
+# Additional resolutions to average alongside the primary STAGE2_IMG_SIZE.
+# Retinal lesions appear at different scales; multi-resolution averaging helps.
+MULTISCALE_TTA_SIZES = [480, STAGE2_IMG_SIZE, 544]
+
+# ---------------------------------------------------------------------------
 # Model comparison (notebook 06)
 # ---------------------------------------------------------------------------
 COMPARISON_MODELS = {
@@ -228,5 +252,13 @@ def resolve_amp(device: torch.device) -> tuple[torch.dtype | None, bool]:
 
 def ensure_dirs():
     """Create all required output directories."""
-    for d in [DATA_DIR, APTOS_DATA_DIR, OUTPUTS_DIR, CHECKPOINTS_DIR, FIGURES_DIR, LOGS_DIR]:
+    for d in [
+        DATA_DIR,
+        APTOS_DATA_DIR,
+        OUTPUTS_DIR,
+        CHECKPOINTS_DIR,
+        KFOLD_CHECKPOINTS_DIR,
+        FIGURES_DIR,
+        LOGS_DIR,
+    ]:
         os.makedirs(d, exist_ok=True)
