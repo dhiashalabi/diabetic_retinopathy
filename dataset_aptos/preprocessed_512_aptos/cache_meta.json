@@ -1,9 +1,0 @@
-{
-  "cache_image_format": "png",
-  "cache_image_quality": 95,
-  "dataset_name": "aptos",
-  "img_size": 512,
-  "num_unique_images": 550,
-  "source_images_dir": "/teamspace/studios/this_studio/diabetic_retinopathy/dataset_aptos/train_images",
-  "version": "v8"
-}

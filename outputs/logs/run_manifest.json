@@ -1,23 +1,9 @@
 {
-  "notebook_stage": "03b_aptos_start",
-  "AMP_DTYPE": "bfloat16",
-  "_updated_at": "2026-05-04T11:35:23Z",
   "stage": "eyepacs",
   "notebook": "03_training",
+  "AMP_DTYPE": "bfloat16",
   "MODEL_NAME": "tf_efficientnetv2_s.in21k_ft_in1k",
   "STAGE1_BATCH_SIZE": 512,
   "PREPROCESSING_CACHE_VERSION": "v8",
-  "stage_aptos_finetune": true,
-  "checkpoint_aptos": "/teamspace/studios/this_studio/diabetic_retinopathy/outputs/checkpoints/best_model_aptos_finetune.pth",
-  "STAGE2_BATCH_SIZE": 128,
-  "evaluation_notebook": {
-    "qwk": 0.9118633070184925,
-    "tta_used": false,
-    "qwk_argmax_no_tta": null,
-    "figures_dir": "/teamspace/studios/this_studio/diabetic_retinopathy/outputs/figures"
-  },
-  "evaluation_notebook_tta": {
-    "qwk": 0.9078362238428326,
-    "tta_used": true
-  }
+  "_updated_at": "2026-05-08T06:20:47Z"
 }
