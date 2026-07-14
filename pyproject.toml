@@ -23,7 +23,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-demo = ["gradio>=6.10"]
+demo = ["gradio>=6.15.1"]
 dev = ["ruff>=0.15", "jupyter>=1.1"]
 
 [tool.ruff]
