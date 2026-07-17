@@ -5,7 +5,7 @@ description = "Diabetic Retinopathy detection from retinal fundus images using E
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "torch>=2.11",
+    "torch>=2.13.0",
     "torchvision>=0.26",
     "timm>=1.0.26",
     "albumentations>=2.0.8",
